@@ -1,0 +1,113 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-brand-50: #f1f7f3;
+  --color-brand-100: #dcebe2;
+  --color-brand-200: #b9d7c5;
+  --color-brand-500: #3f7d61;
+  --color-brand-600: #2f684f;
+  --color-brand-700: #285440;
+  --color-brand-800: #234536;
+  --color-accent-50: #fff6ed;
+  --color-accent-100: #ffead5;
+  --color-accent-500: #c96b36;
+  --color-accent-600: #ad5528;
+  --color-ink-950: #17201c;
+  --color-canvas: #f6f7f5;
+  --color-surface: #ffffff;
+  --color-line: #dde2de;
+}
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  color: #24302a;
+  background: #f6f7f5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  background: #f6f7f5;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100dvh;
+  background: #f6f7f5;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+button,
+a,
+select,
+input[type="checkbox"],
+input[type="radio"] {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled,
+select:disabled,
+textarea:disabled {
+  cursor: not-allowed;
+}
+
+:focus-visible {
+  outline: 3px solid #3f7d61;
+  outline-offset: 2px;
+}
+
+::selection {
+  color: #17201c;
+  background: #b9d7c5;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.overflow-wrap-anywhere {
+  overflow-wrap: anywhere;
+}
+
+/* Keep compact mobile waiter actions named and visible instead of icon-only. */
+@media (max-width: 639px) {
+  main button > .hidden.sm\:inline {
+    display: inline;
+  }
+}
+
+.safe-bottom {
+  padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+.scrollbar-subtle {
+  scrollbar-color: #b9c2bc transparent;
+  scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

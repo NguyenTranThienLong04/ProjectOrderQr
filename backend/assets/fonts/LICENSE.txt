@@ -1,0 +1,7 @@
+Noto Sans Regular
+
+Source: https://github.com/notofonts/noto-fonts
+License: SIL Open Font License, Version 1.1 (OFL-1.1)
+
+This bundled font is used only to render invoices consistently, including
+Vietnamese diacritics, without downloading fonts at runtime.

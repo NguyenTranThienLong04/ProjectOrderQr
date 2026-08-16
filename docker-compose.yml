@@ -1,0 +1,44 @@
+services:
+  mongodb:
+    image: mongo:7
+    container_name: hethongorder-mongodb
+    restart: unless-stopped
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: hethongorder
+
+  backend:
+    build: ./backend
+    depends_on:
+      - mongodb
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      MONGODB_URI: mongodb://mongodb:27017/hethongorder
+      CORS_ORIGIN: http://localhost:5173
+      FRONTEND_URL: http://localhost:5173
+      JWT_ACCESS_SECRET: change-me-in-production-access
+      JWT_REFRESH_SECRET: change-me-in-production-refresh
+      CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
+      CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
+      CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
+      VNP_TMN_CODE: ${VNP_TMN_CODE:-}
+      VNP_HASH_SECRET: ${VNP_HASH_SECRET:-}
+      VNP_URL: https://sandbox.vnpayment.vn/paymentv2/vpcpay.html
+      VNP_RETURN_URL: ${VNP_RETURN_URL:-http://localhost:3000/vnpay/return}
+      VNP_IPN_URL: ${VNP_IPN_URL:-}
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    ports:
+      - '5173:80'
+
+volumes:
+  mongodb_data:
