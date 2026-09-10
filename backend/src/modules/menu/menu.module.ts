@@ -16,5 +16,6 @@ import { MenuService } from './menu.service';
   ],
   controllers: [MenuController],
   providers: [MenuService],
+  exports: [MenuService],
 })
 export class MenuModule {}

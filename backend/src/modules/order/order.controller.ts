@@ -21,6 +21,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/user-role.enum';
+import { InvoiceLookupService } from '../invoice/invoice-lookup.service';
 
 /** Customer endpoint: deliberately public; DTO and service validate all references. */
 @Controller('orders')
@@ -29,6 +30,7 @@ export class OrderController {
     private readonly orderService: OrderService,
     private readonly appGateway: AppGateway,
     private readonly stateMachine: OrderStateMachineService,
+    private readonly invoices: InvoiceLookupService,
   ) {}
 
   @Post()
@@ -77,14 +79,14 @@ export class OrderController {
     @Query() dto: GetInvoiceDto,
     @Res() response: Response,
   ) {
-    const pdf = await this.orderService.generateInvoice(
+    const { pdf, filename } = await this.invoices.legacyFile(
       params.orderId,
       dto.sessionId,
     );
     response.setHeader('Content-Type', 'application/pdf');
     response.setHeader(
       'Content-Disposition',
-      `attachment; filename="invoice-${params.orderId}.pdf"`,
+      `attachment; filename="${filename}"`,
     );
     response.setHeader('Content-Length', pdf.length);
     response.send(pdf);

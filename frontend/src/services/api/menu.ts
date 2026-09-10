@@ -1,9 +1,17 @@
+import type { OrderNoteAnalysis } from './ai';
 import { axiosClient } from "./axios-client";
 
 export interface PublicDish {
   _id: string;
   name: string;
   description?: string;
+  descriptionEn?: string;
+  ingredients?: string[];
+  allergenTags?: string[];
+  dietaryTags?: string[];
+  spiceLevel?: number | null;
+  servingSize?: string;
+  availableModifiers?: string[];
   price: number;
   imageUrl?: string;
   isAvailable: boolean;
@@ -34,6 +42,7 @@ export interface SharedCartItem {
   unitPrice: number;
   quantity: number;
   note?: string;
+  aiNoteAnalysis?: OrderNoteAnalysis;
 }
 
 export interface SharedCart {

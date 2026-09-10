@@ -1,5 +1,6 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
+import { generateInvoiceCode, INVOICE_CODE_PATTERN } from './invoice-code';
 
 export enum PaymentIntentStatus {
   PENDING = 'pending',
@@ -11,6 +12,10 @@ export type PaymentIntentDocument = HydratedDocument<PaymentIntent>;
 
 @Schema({ timestamps: true, collection: 'payment_intents' })
 export class PaymentIntent {
+  /** Public display identity; optional only for pre-existing intents. */
+  @Prop({ type: String, immutable: true, match: INVOICE_CODE_PATTERN })
+  invoiceCode?: string;
+
   @Prop({ required: true, trim: true })
   txnRef!: string;
 
@@ -62,6 +67,19 @@ export class PaymentIntent {
 }
 
 export const PaymentIntentSchema = SchemaFactory.createForClass(PaymentIntent);
+
+// A default would also run while hydrating legacy documents, producing phantom
+// codes that have never been persisted. Generate only for new writes instead.
+PaymentIntentSchema.pre('validate', function () {
+  if (this.isNew && !this.invoiceCode) this.invoiceCode = generateInvoiceCode();
+});
+PaymentIntentSchema.index(
+  { invoiceCode: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { invoiceCode: { $type: 'string' } },
+  },
+);
 
 PaymentIntentSchema.index({ txnRef: 1 }, { unique: true });
 PaymentIntentSchema.index({ sessionId: 1, createdAt: -1 });

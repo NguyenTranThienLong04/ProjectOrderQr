@@ -73,9 +73,12 @@ export class OrderService {
         dishId: item.dishId,
         // Re-snapshot from current Dish data after availability validation.
         dishName: dish.name,
+        nameEn: dish.nameEn?.trim() || undefined,
+        imageUrl: dish.imageUrl?.trim() || undefined,
         unitPrice: dish.price,
         quantity: item.quantity,
         note: item.note?.trim() || undefined,
+        aiNoteAnalysis: item.aiNoteAnalysis,
         status: OrderStatus.PENDING,
         statusHistory,
       };
@@ -169,6 +172,7 @@ export class OrderService {
           dishName: it.dishName,
           quantity: it.quantity,
           note: it.note,
+          aiNoteAnalysis: it.aiNoteAnalysis,
           status: it.status,
         })),
       createdAt: this.getCreatedAt(order),
@@ -198,6 +202,7 @@ export class OrderService {
           dishName: it.dishName,
           quantity: it.quantity,
           note: it.note,
+          aiNoteAnalysis: it.aiNoteAnalysis,
           status: it.status,
         })),
       createdAt: this.getCreatedAt(order),

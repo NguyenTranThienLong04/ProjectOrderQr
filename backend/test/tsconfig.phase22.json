@@ -1,0 +1,9 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "incremental": false },
+  "include": [
+    "../src/modules/ai/review-intelligence/**/*.ts",
+    "./review-intelligence.e2e-spec.ts"
+  ],
+  "exclude": ["../node_modules"]
+}

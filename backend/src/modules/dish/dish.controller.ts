@@ -21,6 +21,7 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/user-role.enum';
+import { DISH_METADATA_OPTIONS } from './dish-metadata';
 
 /** Cấu hình multer dùng chung: lưu vào memory (không ghi file local), lọc định dạng ảnh */
 const imageInterceptor = FileInterceptor('image', {
@@ -50,6 +51,13 @@ export class DishController {
   ) {
     const showAll = includeInactive === 'true';
     return this.dishService.findAll(categoryId, showAll);
+  }
+
+  @Get('metadata-options')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  metadataOptions() {
+    return DISH_METADATA_OPTIONS;
   }
 
   @Get(':id')

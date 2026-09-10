@@ -1,4 +1,6 @@
+import type { OrderNoteAnalysis } from './ai';
 import { axiosClient } from './axios-client';
+import { downloadInvoiceBlob } from './invoice-download';
 
 export interface KitchenItem {
   itemId: string;
@@ -6,6 +8,7 @@ export interface KitchenItem {
   quantity: number;
   status: string;
   note?: string;
+  aiNoteAnalysis?: OrderNoteAnalysis;
 }
 
 export interface KitchenOrder {
@@ -42,9 +45,6 @@ export const orderApi = {
   },
   downloadInvoice: async (orderId: string, sessionId: string) => {
     const res = await axiosClient.get(`/orders/${orderId}/invoice`, { params: { sessionId }, responseType: 'blob' });
-    const url = URL.createObjectURL(res.data);
-    const link = document.createElement('a');
-    link.href = url; link.download = `invoice-${orderId}.pdf`; link.click();
-    URL.revokeObjectURL(url);
+    downloadInvoiceBlob(res.data, res.headers['content-disposition']);
   },
 };

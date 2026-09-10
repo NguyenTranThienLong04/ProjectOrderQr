@@ -107,7 +107,11 @@ export class DishService {
     }
 
     const updatedDish = await this.dishModel
-      .findByIdAndUpdate(id, updateData, { new: true })
+      .findByIdAndUpdate(
+        id,
+        { $set: updateData },
+        { new: true, runValidators: true },
+      )
       .populate('categoryId')
       .exec();
 

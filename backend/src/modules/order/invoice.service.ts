@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import PDFDocument from 'pdfkit';
 import { join } from 'path';
 import { OrderDocument } from './order.schema';
+import type { InvoiceDetailDto } from '../invoice/dto/invoice.dto';
 
 const fontPath = join(__dirname, '../../../assets/fonts/NotoSans-Regular.ttf');
 const currency = new Intl.NumberFormat('vi-VN', {
@@ -29,7 +30,7 @@ export class InvoiceService {
       .fillColor('#555555')
       .text('Hóa đơn điện tử', { align: 'center' });
     document.fillColor('#000000').moveDown(2);
-    document.fontSize(11).text(`Mã đơn: ${order.id}`);
+    document.fontSize(11).text('HÓA ĐƠN THANH TOÁN');
     document.text(
       `Thời gian: ${this.formatDate(order.paidAt ?? this.createdAt(order))}`,
     );
@@ -48,6 +49,7 @@ export class InvoiceService {
         .fontSize(9)
         .text(`Đơn giá: ${currency.format(item.unitPrice)}`);
       document.fillColor('#000000');
+      if (item.note) document.text(`Ghi chú: ${item.note}`);
     }
 
     document.moveDown();
@@ -81,16 +83,7 @@ export class InvoiceService {
     return result;
   }
 
-  async renderSession(
-    orders: OrderDocument[],
-    payment: {
-      sessionId: string;
-      txnRef: string;
-      transactionNo?: string;
-      amount: number;
-      paidAt: Date;
-    },
-  ): Promise<Buffer> {
+  async renderDetail(invoice: InvoiceDetailDto): Promise<Buffer> {
     const document = new PDFDocument({ margin: 50, size: 'A4' });
     document.registerFont('NotoSans', fontPath);
     document.font('NotoSans');
@@ -106,19 +99,21 @@ export class InvoiceService {
       .moveDown(0.5)
       .fontSize(10)
       .fillColor('#555555')
-      .text('Hóa đơn tổng hợp phiên ăn', { align: 'center' });
+      .text('HÓA ĐƠN THANH TOÁN', { align: 'center' });
     document.fillColor('#000000').moveDown(2);
-    document.fontSize(10).text(`Mã phiên: ${payment.sessionId}`);
-    document.text(`Mã giao dịch: ${payment.txnRef}`);
-    if (payment.transactionNo)
-      document.text(`Mã VNPAY: ${payment.transactionNo}`);
-    document.text(`Thời gian: ${this.formatDate(payment.paidAt)}`);
+    document.fontSize(11).text(`Mã hóa đơn: ${invoice.invoiceCode}`);
+    document.text(`Bàn: ${invoice.table.displayName}`);
+    document.text(
+      `Thời gian: ${invoice.paidAt ? this.formatDate(invoice.paidAt) : 'Chưa có thông tin'}`,
+    );
+    if (invoice.vnpTransactionNo)
+      document.text(`Mã VNPAY: ${invoice.vnpTransactionNo}`);
 
-    orders.forEach((order, orderIndex) => {
+    invoice.orders.forEach((order) => {
       document
         .moveDown(1.2)
         .fontSize(12)
-        .text(`Lượt gọi món #${orderIndex + 1} · ${order.id}`, {
+        .text(`Lượt gọi món #${order.sequence}`, {
           underline: true,
         });
       document.moveDown(0.4);
@@ -126,7 +121,7 @@ export class InvoiceService {
         const lineTotal = item.unitPrice * item.quantity;
         document
           .fontSize(10)
-          .text(`${item.dishName} × ${item.quantity}`, { continued: true });
+          .text(`${item.name} × ${item.quantity}`, { continued: true });
         document.text(currency.format(lineTotal), { align: 'right' });
         if (item.note) {
           document
@@ -145,27 +140,7 @@ export class InvoiceService {
         .fillColor('#000000');
     });
 
-    const subtotalAmount = orders.reduce(
-      (sum, order) =>
-        sum +
-        (order.subtotalAmount ||
-          order.items.reduce(
-            (itemSum, item) => itemSum + item.unitPrice * item.quantity,
-            0,
-          )),
-      0,
-    );
-    const discountAmount = orders.reduce(
-      (sum, order) =>
-        sum +
-        (order.discountAmount ||
-          Math.max(
-            0,
-            (order.subtotalAmount || order.totalAmount) - order.totalAmount,
-          )),
-      0,
-    );
-    const paidTotal = orders.reduce((sum, order) => sum + order.totalAmount, 0);
+    const { subtotalAmount, discountAmount, totalAmount: paidTotal } = invoice;
     document.moveDown(1.5);
     document
       .fontSize(10)
@@ -180,9 +155,6 @@ export class InvoiceService {
       .text(`Tổng thanh toán: ${currency.format(paidTotal)}`, {
         align: 'right',
       });
-    if (paidTotal !== payment.amount) {
-      throw new Error('PaymentIntent amount không khớp snapshot hóa đơn');
-    }
     document
       .moveDown(2)
       .fontSize(10)

@@ -10,10 +10,11 @@ import { Dish, DishSchema } from '../dish/dish.schema';
 import { SessionModule } from '../session/session.module';
 import { GatewayModule } from '../../gateway/gateway.module';
 import { PromotionModule } from '../promotion/promotion.module';
-import { InvoiceService } from './invoice.service';
+import { InvoiceModule } from '../invoice/invoice.module';
 
 @Module({
   imports: [
+    InvoiceModule,
     SessionModule,
     GatewayModule,
     PromotionModule,
@@ -25,7 +26,7 @@ import { InvoiceService } from './invoice.service';
     ]),
   ],
   controllers: [OrderController],
-  providers: [OrderService, OrderStateMachineService, InvoiceService],
-  exports: [MongooseModule, OrderStateMachineService, InvoiceService],
+  providers: [OrderService, OrderStateMachineService],
+  exports: [MongooseModule, OrderStateMachineService, InvoiceModule],
 })
 export class OrderModule {}

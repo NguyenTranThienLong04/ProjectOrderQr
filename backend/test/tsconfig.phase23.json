@@ -1,0 +1,6 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "incremental": false },
+  "include": ["../src/modules/menu/recommendation*.ts", "../src/modules/menu/dto/recommend-menu.dto.ts", "../src/modules/menu/menu.controller.ts", "../src/modules/menu/menu.module.ts", "./menu-recommendations.e2e-spec.ts"],
+  "exclude": ["../node_modules"]
+}

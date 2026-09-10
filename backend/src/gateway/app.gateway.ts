@@ -11,6 +11,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { SessionService } from '../modules/session/session.service';
+import { socketCorsOrigin } from '../common/config/public-urls';
 
 interface JoinCartPayload {
   sessionId: string;
@@ -20,6 +21,8 @@ interface AddCartPayload {
   dishId: string;
   quantity?: number;
   note?: string;
+  analysisToken?: unknown;
+  confirmedByCustomer?: unknown;
 }
 interface UpdateQuantityPayload {
   sessionId: string;
@@ -40,7 +43,7 @@ const WAITER_CALL_COOLDOWN_MS = 30_000;
 
 @WebSocketGateway({
   cors: {
-    origin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+    origin: socketCorsOrigin,
   },
 })
 export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -217,6 +220,8 @@ export class AppGateway implements OnGatewayConnection, OnGatewayDisconnect {
         payload?.dishId,
         payload?.quantity ?? 1,
         payload?.note,
+        payload?.analysisToken,
+        payload?.confirmedByCustomer,
       );
       await this.synchronizeSession(payload.sessionId);
     } catch (error) {

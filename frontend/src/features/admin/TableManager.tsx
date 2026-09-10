@@ -4,7 +4,7 @@ import { Download, Edit2, Grid2X2, Plus, QrCode, RefreshCw, Trash2, Users } from
 import { tableApi, type Table } from '../../services/api/table';
 import { ConfirmDialog, EmptyState, Feedback, LoadingState, Modal, PageHeader, StatusBadge, controlClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL as socketUrl } from '../../config/api-url';
 type TableStatus = Table['status'];
 
 export function TableManager() {

@@ -46,6 +46,26 @@ npm run test:cov -- --runInBand
 
 E2E dùng MongoDB theo `backend/.env`; không chạy trên database production. Chi tiết security review: [docs/security-review.md](docs/security-review.md).
 
+## Dữ liệu development/demo cho AI (Phase 16)
+
+Dataset synthetic gồm 40 món Việt / 8 danh mục, 640 historical basket và 240 comment.
+Chạy `npm run validate:ai-demo` trong `backend` để kiểm tra offline.
+Seed/reset cần database riêng, opt-in và `NODE_ENV=development|test`; không gọi từ
+startup và không tạo Order Paid, PaymentIntent hay Review nghiệp vụ giả.
+Hướng dẫn cấu hình, `seed:ai-demo`, `reset:ai-demo`, giới hạn và kiểm thử:
+[docs/ai-demo-data.md](docs/ai-demo-data.md).
+Test MongoDB riêng Phase 16 yêu cầu `AI_DEMO_TEST_MONGODB_URI`, luôn override sang
+database test có tên duy nhất; không dùng database ứng dụng làm đích kiểm thử.
+
+## AI Foundation (Phase 17)
+
+Backend có `AiModule` với provider abstraction, structured output validation,
+timeout/retry có giới hạn và audit metadata. AI mặc định tắt; cấu hình trong
+`backend/.env.example`. Chưa có API chatbot hoặc tính năng AI nghiệp vụ.
+Setup, test và live smoke opt-in: [docs/ai-setup.md](docs/ai-setup.md).
+Evidence: [docs/phase17-verification.md](docs/phase17-verification.md).
+Live provider chưa verify vì chưa có credential.
+
 ## Mô tả CV
 
 Xây dựng hệ thống quản lý nhà hàng và QR ordering với NestJS, React, MongoDB và Socket.io: đồng bộ shared cart real-time bằng atomic Mongo updates, triển khai state machine món ăn có RBAC/audit trail, xác thực VNPAY IPN bằng HMAC và idempotency, và xây dashboard doanh thu bằng aggregation pipelines. Hỗ trợ dynamic QR generation, chuyển/ghép/tách bàn có kiểm soát race condition.

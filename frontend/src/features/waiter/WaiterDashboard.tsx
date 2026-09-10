@@ -17,7 +17,7 @@ import { sessionApi, type TableOperationOptions } from '../../services/api/sessi
 import { tableApi, type Table } from '../../services/api/table';
 import { EmptyState, Feedback, PageHeader, StatusBadge, controlClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL as socketUrl } from '../../config/api-url';
 interface WaiterCall { tableId: string; timestamp: string; }
 const getErrorMessage = (error: unknown) => (error as { response?: { data?: { message?: string } } }).response?.data?.message ?? (error instanceof Error ? error.message : 'Vui lòng thử lại.');
 

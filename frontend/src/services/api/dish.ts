@@ -6,6 +6,13 @@ export interface Dish {
   name: string;
   nameEn?: string;
   description?: string;
+  descriptionEn?: string;
+  ingredients?: string[];
+  allergenTags?: string[];
+  dietaryTags?: string[];
+  spiceLevel?: number | null;
+  servingSize?: string;
+  availableModifiers?: string[];
   price: number;
   imageUrl?: string;
   categoryId: Category | string;
@@ -14,7 +21,19 @@ export interface Dish {
   updatedAt?: string;
 }
 
+export interface DishMetadataOptions {
+  allergens: { value: string; label: string }[];
+  dietaryTags: { value: string; label: string }[];
+  modifiers: { value: string; label: string }[];
+  spiceLevels: { value: number; label: string }[];
+  limits: { ingredients: number; ingredientLength: number; descriptionEn: number; servingSize: number };
+}
+
 export const dishApi = {
+  metadataOptions: async (): Promise<DishMetadataOptions> => {
+    const response = await axiosClient.get<DishMetadataOptions>('/dishes/metadata-options');
+    return response.data;
+  },
   findAll: async (
     categoryId?: string,
     includeInactive = false,

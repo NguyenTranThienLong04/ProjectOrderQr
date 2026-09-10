@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "test:order-progress": "node --import ./test/register-tsx.mjs --test test/order-progress.test.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

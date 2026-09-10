@@ -16,6 +16,7 @@ import { SessionStatus } from '../../common/enums/session-status.enum';
 import { TableStatus } from '../../common/enums/table-status.enum';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStatus } from '../../common/enums/order-status.enum';
+import { frontendUrl } from '../../common/config/public-urls';
 
 @Injectable()
 export class TableService {
@@ -28,9 +29,7 @@ export class TableService {
   ) {}
 
   private getFrontendUrl(): string {
-    return (
-      this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5173'
-    );
+    return frontendUrl(this.configService.get<string>('FRONTEND_URL'));
   }
 
   private async generateQrCodeDataUrl(tableId: string): Promise<string> {

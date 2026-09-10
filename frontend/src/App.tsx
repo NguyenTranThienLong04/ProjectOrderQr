@@ -14,6 +14,7 @@ import RequireRole from './components/RequireRole';
 import { StaffLayout } from './features/staff/StaffLayout';
 import { PaymentResult } from './features/payment/PaymentResult';
 import { PromotionManager } from './features/admin/PromotionManager';
+import { InvoiceLookup } from './features/admin/InvoiceLookup';
 
 function RouteFocus() {
   const { pathname } = useLocation();
@@ -39,6 +40,7 @@ function App() {
           <Route index element={<Navigate to="/admin/analytics" replace />} />
           <Route path="analytics" element={<RequireRole roles={["admin"]}><AdminDashboard /></RequireRole>} />
           <Route path="tables" element={<TableManager />} />
+          <Route path="invoices" element={<InvoiceLookup />} />
           <Route path="categories" element={<RequireRole roles={["admin"]}><CategoryManager /></RequireRole>} />
           <Route path="dishes" element={<RequireRole roles={["admin"]}><DishManager /></RequireRole>} />
           <Route path="users" element={<RequireRole roles={["admin"]}><UserManager /></RequireRole>} />

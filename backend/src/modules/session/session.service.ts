@@ -1,3 +1,5 @@
+import { readOrderNoteReceipt } from '../../common/order-note-receipt';
+import type { OrderNoteAnalysis } from '../../common/schemas/order-note-analysis.schema';
 import {
   BadRequestException,
   Injectable,
@@ -22,6 +24,7 @@ export interface CartItemResponse {
   unitPrice: number;
   quantity: number;
   note?: string;
+  aiNoteAnalysis?: OrderNoteAnalysis;
 }
 
 export interface TableOperationCandidate {
@@ -71,6 +74,7 @@ export class SessionService {
         unitPrice: item.unitPrice,
         quantity: item.quantity,
         note: item.note,
+        aiNoteAnalysis: item.aiNoteAnalysis,
       })),
     };
   }
@@ -502,6 +506,8 @@ export class SessionService {
     dishId: string,
     quantity: number,
     note?: string,
+    analysisToken?: unknown,
+    confirmedByCustomer?: unknown,
   ) {
     if (
       !Types.ObjectId.isValid(dishId) ||
@@ -513,6 +519,16 @@ export class SessionService {
     }
     const normalizedNote = this.normalizeCartItemNote(note);
     const dish = await this.findAvailableDish(dishId);
+    const aiNoteAnalysis =
+      confirmedByCustomer === true
+        ? readOrderNoteReceipt(
+            analysisToken,
+            sessionId,
+            dishId,
+            normalizedNote ?? '',
+            dish.availableModifiers ?? [],
+          )
+        : undefined;
     const objectDishId = new Types.ObjectId(dishId);
     const itemIdentity = this.cartItemIdentity(objectDishId, normalizedNote);
     let session = await this.sessionModel
@@ -524,7 +540,12 @@ export class SessionService {
         },
         {
           $inc: { 'cart.$.quantity': quantity, version: 1 },
-          $set: { lastActivityAt: new Date() },
+          $set: {
+            lastActivityAt: new Date(),
+            ...(aiNoteAnalysis
+              ? { 'cart.$.aiNoteAnalysis': aiNoteAnalysis }
+              : {}),
+          },
         },
         { new: true },
       )
@@ -545,6 +566,7 @@ export class SessionService {
                 unitPrice: dish.price,
                 quantity,
                 note: normalizedNote,
+                aiNoteAnalysis,
               },
             },
             $inc: { version: 1 },
@@ -565,7 +587,12 @@ export class SessionService {
           },
           {
             $inc: { 'cart.$.quantity': quantity, version: 1 },
-            $set: { lastActivityAt: new Date() },
+            $set: {
+              lastActivityAt: new Date(),
+              ...(aiNoteAnalysis
+                ? { 'cart.$.aiNoteAnalysis': aiNoteAnalysis }
+                : {}),
+            },
           },
           { new: true },
         )
@@ -1003,6 +1030,7 @@ export class SessionService {
             unitPrice: number;
             quantity: number;
             note?: string;
+            aiNoteAnalysis?: OrderNoteAnalysis;
             addedAt: Date;
           }
         >();
@@ -1012,6 +1040,7 @@ export class SessionService {
           const old = mergedMap.get(key);
           if (old) {
             old.quantity += item.quantity;
+            old.aiNoteAnalysis ??= item.aiNoteAnalysis;
           } else
             mergedMap.set(key, {
               _id: item._id,
@@ -1020,6 +1049,7 @@ export class SessionService {
               unitPrice: item.unitPrice,
               quantity: item.quantity,
               note: normalizedNote,
+              aiNoteAnalysis: item.aiNoteAnalysis,
               addedAt: item.addedAt,
             });
         };
@@ -1318,6 +1348,7 @@ export class SessionService {
                   dishName: item.dishName,
                   unitPrice: item.unitPrice,
                   note: item.note,
+                  aiNoteAnalysis: item.aiNoteAnalysis,
                   addedAt: item.addedAt,
                   quantity,
                 },

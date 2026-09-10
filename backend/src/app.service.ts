@@ -11,6 +11,8 @@ export class AppService implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap() {
+    // Production uses an explicitly provisioned staff account, never demo login.
+    if (process.env.NODE_ENV === 'production') return;
     try {
       const count = await this.userService.countUsers();
       if (count === 0) {

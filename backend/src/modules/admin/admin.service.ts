@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model } from 'mongoose';
+import { Model, PipelineStage } from 'mongoose';
 import { Order, OrderDocument } from '../order/order.schema';
 import { Table, TableDocument } from '../table/table.schema';
 import { Dish, DishDocument } from '../dish/dish.schema';
@@ -29,7 +29,10 @@ export class AdminService {
     to?: Date,
     groupBy: 'day' | 'month' | 'year' = 'day',
   ) {
-    const match: any = { status: OrderStatus.PAID };
+    const match: {
+      status: OrderStatus;
+      paidAt?: { $gte?: Date; $lte?: Date };
+    } = { status: OrderStatus.PAID };
     if (from || to) {
       match.paidAt = {};
       if (from) match.paidAt.$gte = from;
@@ -61,13 +64,32 @@ export class AdminService {
       },
     ];
 
-    const result = await this.orderModel.aggregate(pipeline).exec();
+    const result = await this.orderModel
+      .aggregate<{ date: string; revenue: number; orders: number }>(pipeline)
+      .exec();
     return result;
   }
 
-  async getTopRatedDishes(limit = 10) {
+  async getTopRatedDishes(limit = 10, from?: Date, to?: Date) {
     return this.reviewModel
-      .aggregate([
+      .aggregate<{
+        dishId: unknown;
+        dishName: string;
+        averageRating: number;
+        reviewCount: number;
+      }>([
+        ...(from || to
+          ? [
+              {
+                $match: {
+                  createdAt: {
+                    ...(from ? { $gte: from } : {}),
+                    ...(to ? { $lte: to } : {}),
+                  },
+                },
+              },
+            ]
+          : []),
         {
           $group: {
             _id: '$dishId',
@@ -93,8 +115,30 @@ export class AdminService {
             reviewCount: 1,
           },
         },
-        { $sort: { averageRating: -1, reviewCount: -1 } },
+        { $sort: { averageRating: -1, reviewCount: -1, dishId: 1 } },
         { $limit: limit },
+      ])
+      .exec();
+  }
+
+  async getRatingSummary(from: Date, to: Date) {
+    return this.reviewModel
+      .aggregate<{ averageRating: number; reviewCount: number }>([
+        { $match: { createdAt: { $gte: from, $lte: to } } },
+        {
+          $group: {
+            _id: null,
+            averageRating: { $avg: '$rating' },
+            reviewCount: { $sum: 1 },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            averageRating: { $round: ['$averageRating', 2] },
+            reviewCount: 1,
+          },
+        },
       ])
       .exec();
   }
@@ -105,14 +149,17 @@ export class AdminService {
    * all items in application memory.
    */
   async getTopDishes(from?: Date, to?: Date, limit = 10) {
-    const match: any = { status: OrderStatus.PAID };
+    const match: {
+      status: OrderStatus;
+      paidAt?: { $gte?: Date; $lte?: Date };
+    } = { status: OrderStatus.PAID };
     if (from || to) {
       match.paidAt = {};
       if (from) match.paidAt.$gte = from;
       if (to) match.paidAt.$lte = to;
     }
 
-    const pipeline: any[] = [
+    const pipeline: PipelineStage[] = [
       { $match: match },
       { $unwind: '$items' },
       {
@@ -125,7 +172,13 @@ export class AdminService {
           },
         },
       },
-      { $sort: { totalQuantity: -1 as const, revenue: -1 as const } },
+      {
+        $sort: {
+          totalQuantity: -1 as const,
+          revenue: -1 as const,
+          _id: 1 as const,
+        },
+      },
       { $limit: limit },
       {
         $project: {
@@ -138,7 +191,14 @@ export class AdminService {
       },
     ];
 
-    const result = await this.orderModel.aggregate(pipeline as any).exec();
+    const result = await this.orderModel
+      .aggregate<{
+        dishId: unknown;
+        dishName: string;
+        totalQuantity: number;
+        revenue: number;
+      }>(pipeline)
+      .exec();
     return result;
   }
 
@@ -165,7 +225,7 @@ export class AdminService {
           .exec(),
         this.tableModel.countDocuments({ status: TableStatus.OCCUPIED }).exec(),
         this.orderModel
-          .aggregate([
+          .aggregate<{ avg: number }>([
             { $match: { status: OrderStatus.PAID } },
             { $group: { _id: null, avg: { $avg: '$totalAmount' } } },
           ])

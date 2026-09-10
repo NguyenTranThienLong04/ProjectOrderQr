@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
+import AnalyticsCopilot from './AnalyticsCopilot';
+import ReviewIntelligence from './ReviewIntelligence';
 import { io } from 'socket.io-client';
 import { BarChart3, CalendarRange, ClipboardList, Grid2X2, RefreshCw, Star, TrendingUp, WalletCards } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { adminApi, type AnalyticsOverview, type RevenuePoint, type TopDishPoint, type TopRatedDishPoint } from '../../services/api/admin';
 import { EmptyState, Feedback, LoadingState, PageHeader, controlClass, labelClass, primaryButtonClass } from '../../components/ui';
 
-const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL as socketUrl } from '../../config/api-url';
 const number = new Intl.NumberFormat('vi-VN');
 const money = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND', maximumFractionDigits: 0 });
 
@@ -23,9 +25,13 @@ export default function AdminDashboard() {
   const loadAnalytics = useCallback(async () => {
     setLoading(true); setError('');
     try {
+      const period = {
+        from: fromDate ? `${fromDate}T00:00:00.000Z` : undefined,
+        to: toDate ? `${toDate}T23:59:59.999Z` : undefined,
+      };
       const [revenueData, topData, overviewData, ratedData] = await Promise.all([
-        adminApi.getRevenue({ from: fromDate || undefined, to: toDate || undefined, groupBy }),
-        adminApi.getTopDishes({ from: fromDate || undefined, to: toDate || undefined, limit: 10 }),
+        adminApi.getRevenue({ ...period, groupBy }),
+        adminApi.getTopDishes({ ...period, limit: 10 }),
         adminApi.getOverview(), adminApi.getTopRatedDishes(),
       ]);
       setRevenue(revenueData); setTopDishes(topData); setOverview(overviewData); setTopRatedDishes(ratedData);
@@ -54,6 +60,8 @@ export default function AdminDashboard() {
   return <div className="space-y-6">
     <PageHeader eyebrow="Analytics" title="Tổng quan vận hành" description="Theo dõi doanh thu, đơn hàng và hiệu suất món ăn từ dữ liệu tổng hợp thực tế." />
     <section aria-label="Bộ lọc báo cáo" className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><form onSubmit={(event) => { event.preventDefault(); void loadAnalytics(); }} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-end"><label className={labelClass}>Từ ngày<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className={`${controlClass} mt-1.5`} /></label><label className={labelClass}>Đến ngày<input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} className={`${controlClass} mt-1.5`} /></label><label className={labelClass}>Nhóm dữ liệu<select value={groupBy} onChange={(event) => setGroupBy(event.target.value as 'day' | 'month' | 'year')} className={`${controlClass} mt-1.5`}><option value="day">Theo ngày</option><option value="month">Theo tháng</option><option value="year">Theo năm</option></select></label><button type="submit" disabled={loading} className={primaryButtonClass}>{loading ? <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" /> : <CalendarRange aria-hidden="true" className="h-4 w-4" />}Áp dụng</button></form></section>
+    <AnalyticsCopilot fromDate={fromDate} toDate={toDate} />
+    <ReviewIntelligence fromDate={fromDate} toDate={toDate} />
     {error && <Feedback tone="danger">{error}</Feedback>}
     {loading && !overview ? <LoadingState label="Đang tổng hợp số liệu…" /> : <>
       <section aria-label="Chỉ số chính" className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{cards.map(({ label, value, icon: Icon, tone }) => <article key={label} className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium text-slate-600">{label}</p><p className="tabular-nums mt-2 text-2xl font-black tracking-tight text-slate-950">{value}</p></div><span className={`grid h-10 w-10 place-items-center rounded-lg ${tone}`}><Icon aria-hidden="true" className="h-5 w-5" /></span></div></article>)}</section>

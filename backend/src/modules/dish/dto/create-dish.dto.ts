@@ -5,10 +5,12 @@ import {
   IsNumber,
   Min,
   IsBoolean,
+  IsMongoId,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
+import { DishMetadataDto } from './dish-metadata.dto';
 
-export class CreateDishDto {
+export class CreateDishDto extends DishMetadataDto {
   @IsNotEmpty({ message: 'Tên món ăn không được để trống' })
   @IsString({ message: 'Tên món ăn phải là chuỗi ký tự' })
   name!: string;
@@ -22,17 +24,18 @@ export class CreateDishDto {
   description?: string;
 
   @IsNotEmpty({ message: 'Giá tiền không được để trống' })
-  @Transform(({ value }) => Number(value))
+  @Transform(({ value }: { value: unknown }) => Number(value))
   @IsNumber({}, { message: 'Giá tiền phải là số' })
   @Min(0, { message: 'Giá tiền không được nhỏ hơn 0' })
   price!: number;
 
   @IsNotEmpty({ message: 'Mã danh mục không được để trống' })
   @IsString({ message: 'Mã danh mục phải là chuỗi ký tự' })
+  @IsMongoId({ message: 'Mã danh mục không hợp lệ' })
   categoryId!: string;
 
   @IsOptional()
-  @Transform(({ value }) => {
+  @Transform(({ value }: { value: unknown }) => {
     if (value === 'true' || value === true) return true;
     if (value === 'false' || value === false) return false;
     return value;

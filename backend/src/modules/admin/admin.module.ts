@@ -18,6 +18,6 @@ import { Review, ReviewSchema } from '../review/review.schema';
   ],
   controllers: [AdminController],
   providers: [AdminService],
-  exports: [],
+  exports: [AdminService],
 })
 export class AdminModule {}

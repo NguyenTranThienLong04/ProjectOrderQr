@@ -14,6 +14,7 @@ import {
   PaymentStatusDto,
 } from './dto/create-payment-url.dto';
 import { VnpayService } from './vnpay.service';
+import { frontendUrl } from '../../common/config/public-urls';
 
 @Controller('vnpay')
 export class VnpayController {
@@ -46,15 +47,16 @@ export class VnpayController {
     @Query() query: PaymentStatusDto,
     @Res() response: Response,
   ) {
-    const pdf = await this.vnpayService.generateSessionInvoice(
-      query.txnRef,
-      query.sessionId,
-      query.tableId,
-    );
+    const { pdf, filename } =
+      await this.vnpayService.generateSessionInvoiceFile(
+        query.txnRef,
+        query.sessionId,
+        query.tableId,
+      );
     response.setHeader('Content-Type', 'application/pdf');
     response.setHeader(
       'Content-Disposition',
-      `attachment; filename="session-invoice-${query.txnRef}.pdf"`,
+      `attachment; filename="${filename}"`,
     );
     response.setHeader('Content-Length', pdf.length);
     response.send(pdf);
@@ -75,7 +77,7 @@ export class VnpayController {
     if (query.vnp_ResponseCode)
       params.set('responseCode', query.vnp_ResponseCode);
     return {
-      url: `${process.env.FRONTEND_URL ?? 'http://localhost:5173'}/payment-result?${params.toString()}`,
+      url: `${frontendUrl()}/payment-result?${params.toString()}`,
     };
   }
 

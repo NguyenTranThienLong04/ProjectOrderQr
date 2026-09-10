@@ -1,10 +1,21 @@
 import { axiosClient } from './axios-client';
+import { downloadInvoiceBlob } from './invoice-download';
+
+export interface SessionPaymentOrderItem {
+  dishName: string;
+  nameEn?: string;
+  imageUrl?: string;
+  unitPrice: number;
+  quantity: number;
+  note?: string;
+}
 
 export interface SessionPaymentOrder {
   orderId: string;
   orderNumber: number;
   status: string;
   itemCount: number;
+  items: SessionPaymentOrderItem[];
   subtotalAmount: number;
   discountAmount: number;
   totalAmount: number;
@@ -31,6 +42,7 @@ export interface SessionPaymentSummary {
 }
 
 export interface PaymentStatus {
+  invoiceCode?: string;
   txnRef: string;
   sessionId: string;
   status: 'pending' | 'succeeded' | 'failed';
@@ -87,11 +99,6 @@ export const paymentApi = {
       params: { txnRef, sessionId, tableId },
       responseType: 'blob',
     });
-    const url = URL.createObjectURL(response.data);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `session-invoice-${txnRef}.pdf`;
-    link.click();
-    URL.revokeObjectURL(url);
+    return downloadInvoiceBlob(response.data, response.headers['content-disposition']);
   },
 };

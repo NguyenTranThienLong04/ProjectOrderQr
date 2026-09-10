@@ -12,7 +12,8 @@ import { Connection, Model, Types } from 'mongoose';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { AppGateway } from '../../gateway/app.gateway';
-import { InvoiceService } from '../order/invoice.service';
+import { InvoiceLookupService } from '../invoice/invoice-lookup.service';
+import { ensureInvoiceCode, withInvoiceCodeRetry } from './invoice-code';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStateMachineService } from '../order/order-state-machine.service';
 import { Session, SessionDocument } from '../session/session.schema';
@@ -31,6 +32,14 @@ interface SessionOrderSummary {
   orderNumber: number;
   status: OrderStatus;
   itemCount: number;
+  items: {
+    dishName: string;
+    nameEn?: string;
+    imageUrl?: string;
+    unitPrice: number;
+    quantity: number;
+    note?: string;
+  }[];
   subtotalAmount: number;
   discountAmount: number;
   totalAmount: number;
@@ -71,7 +80,7 @@ export class VnpayService {
     @InjectConnection() private readonly connection: Connection,
     private readonly stateMachine: OrderStateMachineService,
     private readonly gateway: AppGateway,
-    private readonly invoiceService: InvoiceService,
+    private readonly invoiceService: InvoiceLookupService,
   ) {}
 
   private getRequiredConfig(key: string): string {
@@ -225,6 +234,14 @@ export class VnpayService {
       orderNumber,
       status: order.status,
       itemCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
+      items: order.items.map((item) => ({
+        dishName: item.dishName,
+        nameEn: item.nameEn,
+        imageUrl: item.imageUrl,
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        note: item.note,
+      })),
       subtotalAmount,
       discountAmount,
       totalAmount: order.totalAmount,
@@ -398,17 +415,22 @@ export class VnpayService {
     // Session is intentionally absent and can never be paid by this txnRef.
     let intent: PaymentIntentDocument;
     try {
-      intent = await new this.paymentIntentModel({
-        txnRef,
-        coverageKey,
-        sessionId: billing.session._id,
-        tableId: billing.table._id,
-        coveredOrderIds,
-        amount: billing.summary.payableTotal,
-        paymentUrl,
-        status: PaymentIntentStatus.PENDING,
-        expiresAt,
-      }).save();
+      intent = await withInvoiceCodeRetry(
+        (invoiceCode) =>
+          new this.paymentIntentModel({
+            invoiceCode,
+            txnRef,
+            coverageKey,
+            sessionId: billing.session._id,
+            tableId: billing.table._id,
+            coveredOrderIds,
+            amount: billing.summary.payableTotal,
+            paymentUrl,
+            status: PaymentIntentStatus.PENDING,
+            expiresAt,
+          }).save(),
+        now,
+      );
     } catch (error) {
       // The partial unique index makes two simultaneous checkout clicks converge
       // on the one intent that won the insert race.
@@ -487,6 +509,10 @@ export class VnpayService {
   async getPaymentStatus(txnRef: string, sessionId: string, tableId: string) {
     const intent = await this.findOwnedIntent(txnRef, sessionId, tableId);
     return {
+      invoiceCode:
+        intent.status === PaymentIntentStatus.SUCCEEDED
+          ? await ensureInvoiceCode(this.paymentIntentModel, intent)
+          : intent.invoiceCode,
       txnRef: intent.txnRef,
       sessionId: intent.sessionId.toString(),
       status: intent.status,
@@ -502,27 +528,21 @@ export class VnpayService {
     sessionId: string,
     tableId: string,
   ): Promise<Buffer> {
+    return (await this.generateSessionInvoiceFile(txnRef, sessionId, tableId))
+      .pdf;
+  }
+
+  async generateSessionInvoiceFile(
+    txnRef: string,
+    sessionId: string,
+    tableId: string,
+  ) {
     const intent = await this.findOwnedIntent(txnRef, sessionId, tableId);
     if (intent.status !== PaymentIntentStatus.SUCCEEDED)
       throw new ForbiddenException(
         'Chỉ có thể tải hóa đơn sau khi giao dịch đã được xác nhận',
       );
-    const orders = await this.orderModel
-      .find({
-        _id: { $in: intent.coveredOrderIds },
-        sessionId: intent.sessionId,
-      })
-      .sort({ createdAt: 1 })
-      .exec();
-    if (orders.length !== intent.coveredOrderIds.length)
-      throw new NotFoundException('Không tìm thấy đầy đủ đơn của hóa đơn');
-    return this.invoiceService.renderSession(orders, {
-      sessionId: intent.sessionId.toString(),
-      txnRef: intent.txnRef,
-      transactionNo: intent.transactionNo,
-      amount: intent.amount,
-      paidAt: intent.completedAt ?? intent.updatedAt ?? new Date(),
-    });
+    return this.invoiceService.file(await this.invoiceService.detail(intent));
   }
 
   async handleIpn(params: VnpayParams): Promise<IpnResponse> {

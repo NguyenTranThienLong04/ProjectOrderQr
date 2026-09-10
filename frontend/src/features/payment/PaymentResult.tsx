@@ -10,7 +10,7 @@ import { io } from 'socket.io-client';
 import { paymentApi } from '../../services/api/payment';
 import { secondaryButtonClass } from '../../components/ui';
 
-const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL as socketUrl } from '../../config/api-url';
 
 export function PaymentResult() {
   const params = new URLSearchParams(window.location.search);
@@ -22,6 +22,8 @@ export function PaymentResult() {
     initialResult === 'failed' ? 'failed' : 'pending',
   );
   const [invoiceError, setInvoiceError] = useState('');
+  const [invoiceCode, setInvoiceCode] = useState<string>();
+  const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
     if (!txnRef || !tableId || !sessionId || initialResult === 'failed') return;
@@ -39,6 +41,7 @@ export function PaymentResult() {
           tableId,
         );
         if (!active) return;
+        setInvoiceCode(payment.invoiceCode);
         if (payment.status === 'succeeded') setStatus('paid');
         if (payment.status === 'failed') setStatus('failed');
       } catch {
@@ -78,10 +81,14 @@ export function PaymentResult() {
 
   const downloadInvoice = async () => {
     setInvoiceError('');
+    setDownloading(true);
     try {
-      await paymentApi.downloadSessionInvoice(txnRef, sessionId, tableId);
+      const code = await paymentApi.downloadSessionInvoice(txnRef, sessionId, tableId);
+      if (code) setInvoiceCode(code);
     } catch {
       setInvoiceError('Chưa thể tải hóa đơn tổng hợp. Vui lòng thử lại.');
+    } finally {
+      setDownloading(false);
     }
   };
   const config =
@@ -126,13 +133,15 @@ export function PaymentResult() {
           {config.title}
         </h1>
         <p className="mt-3 text-sm leading-6 text-stone-600">{config.text}</p>
+        {status === 'paid' && invoiceCode && <p className="mt-3 break-words text-sm font-semibold">Mã hóa đơn: {invoiceCode}</p>}
         {status === 'paid' && txnRef && sessionId && tableId && (
           <button
             onClick={() => void downloadInvoice()}
+            disabled={downloading}
             className={`${secondaryButtonClass} mt-6 w-full`}
           >
             <ReceiptText aria-hidden="true" className="h-4 w-4" />
-            Tải hóa đơn tổng hợp
+            {downloading ? 'Đang tải hóa đơn…' : 'Tải hóa đơn tổng hợp'}
           </button>
         )}
         {invoiceError && (

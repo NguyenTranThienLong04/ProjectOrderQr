@@ -1,3 +1,7 @@
+import {
+  OrderNoteAnalysis,
+  OrderNoteAnalysisSchema,
+} from '../../common/schemas/order-note-analysis.schema';
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { OrderStatus } from '../../common/enums/order-status.enum';
@@ -19,6 +23,12 @@ export class OrderItem {
   @Prop({ required: true, trim: true })
   dishName!: string;
 
+  @Prop({ trim: true })
+  nameEn?: string;
+
+  @Prop({ trim: true })
+  imageUrl?: string;
+
   @Prop({ required: true, min: 0 })
   unitPrice!: number;
 
@@ -27,6 +37,9 @@ export class OrderItem {
 
   @Prop({ trim: true, maxlength: 250 })
   note?: string;
+
+  @Prop({ type: OrderNoteAnalysisSchema, default: undefined })
+  aiNoteAnalysis?: OrderNoteAnalysis;
 
   @Prop({
     required: true,

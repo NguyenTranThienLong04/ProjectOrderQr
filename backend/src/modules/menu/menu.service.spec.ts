@@ -25,6 +25,7 @@ describe('MenuService', () => {
   const dishLegacy = {
     _id: 'dish-legacy',
     name: 'Phở bò',
+    description: 'Nước dùng bò',
     categoryId: 'category-legacy',
     isAvailable: true,
   };
@@ -32,6 +33,13 @@ describe('MenuService', () => {
     _id: 'dish-en',
     name: 'Cà phê sữa',
     nameEn: 'Milk coffee',
+    description: 'Cà phê với sữa',
+    descriptionEn: 'Coffee with milk',
+    ingredients: ['coffee', 'milk'],
+    allergenTags: ['milk'],
+    dietaryTags: ['vegetarian'],
+    availableModifiers: ['LESS_ICE'],
+    spiceLevel: 0,
     categoryId: 'category-en',
     isAvailable: true,
   };
@@ -89,5 +97,39 @@ describe('MenuService', () => {
     await expect(service.getPublicMenu('missing', 'en')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+
+  it('localizes descriptions, keeps facts unchanged, and returns empty lists for legacy metadata', async () => {
+    const { service } = createService();
+    const en = await service.getPublicMenu('table-1', 'en');
+    const vi = await service.getPublicMenu('table-1', 'vi');
+    expect(en.categories[0].dishes[0]).toMatchObject({
+      description: 'Nước dùng bò',
+      ingredients: [],
+      allergenTags: [],
+      dietaryTags: [],
+      availableModifiers: [],
+    });
+    expect(en.categories[0].dishes[0].spiceLevel).toBeUndefined();
+    expect(en.categories[1].dishes[0]).toMatchObject({
+      description: 'Coffee with milk',
+      ingredients: ['coffee', 'milk'],
+      allergenTags: ['milk'],
+      spiceLevel: 0,
+    });
+    expect(vi.categories[1].dishes[0].description).toBe('Cà phê với sữa');
+  });
+
+  it('falls back for whitespace-only English descriptions and excludes unavailable/hidden-category dishes in the query', async () => {
+    const { service, dishModel } = createService();
+    dishModel.find.mockReturnValue(
+      chain([{ ...dishLegacy, descriptionEn: '   ' }] as never),
+    );
+    const menu = await service.getPublicMenu('table-1', 'en');
+    expect(menu.categories[0].dishes[0].description).toBe('Nước dùng bò');
+    expect(dishModel.find).toHaveBeenCalledWith({
+      isAvailable: true,
+      categoryId: { $in: ['category-legacy', 'category-en'] },
+    });
   });
 });

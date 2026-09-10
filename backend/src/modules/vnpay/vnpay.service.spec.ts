@@ -236,6 +236,93 @@ describe('VnpayService Session payment', () => {
     );
   });
 
+  it('returns all snapshot lines without changing discounted Session billing', async () => {
+    const order = makeOrder(110_000, OrderStatus.SERVED, {
+      subtotal: 120_000,
+      discount: 10_000,
+    });
+    order.items = [
+      {
+        dishName: 'Cơm chiên bò',
+        nameEn: 'Beef fried rice',
+        imageUrl: '/rice.jpg',
+        unitPrice: 50_000,
+        quantity: 2,
+        note: 'Không hành',
+        status: OrderStatus.SERVED,
+      },
+      {
+        dishName: 'Trà đá',
+        unitPrice: 20_000,
+        quantity: 1,
+        status: OrderStatus.SERVED,
+      },
+    ] as typeof order.items;
+    orders.push(order);
+    const summary = await service.getSessionPaymentSummary(
+      sessionId.toString(),
+      tableId.toString(),
+    );
+    expect(summary).toMatchObject({
+      orderCount: 1,
+      itemCount: 3,
+      subtotalAmount: 120_000,
+      discountAmount: 10_000,
+      payableTotal: 110_000,
+      canPay: true,
+      fullyPaid: false,
+    });
+    expect(summary.orders[0]).toMatchObject({
+      orderId: order.id,
+      orderNumber: 1,
+      status: OrderStatus.SERVED,
+      items: [
+        {
+          dishName: 'Cơm chiên bò',
+          nameEn: 'Beef fried rice',
+          imageUrl: '/rice.jpg',
+          unitPrice: 50_000,
+          quantity: 2,
+          note: 'Không hành',
+        },
+        { dishName: 'Trà đá', unitPrice: 20_000, quantity: 1 },
+      ],
+    });
+    expect(summary.orders[0].items[1].imageUrl).toBeUndefined();
+    expect(summary.orders[0].items[1].nameEn).toBeUndefined();
+    expect(summary.orders[0].items[1].note).toBeUndefined();
+    expect(summary.payableOrders).toEqual(summary.orders);
+    expect(orderModel.find).toHaveBeenCalledTimes(1);
+    const payment = await service.createPaymentUrl(
+      sessionId.toString(),
+      tableId.toString(),
+      '::1',
+    );
+    expect(payment.amount).toBe(110_000);
+    expect(payment.coveredOrderIds).toEqual([order.id]);
+  });
+
+  it.each(Object.values(OrderStatus))(
+    'preserves %s and the legacy single item in progress',
+    async (status) => {
+      orders.push(makeOrder(50_000, status));
+      const summary = await service.getSessionPaymentSummary(
+        sessionId.toString(),
+        tableId.toString(),
+      );
+      expect(summary.orders[0].status).toBe(status);
+      expect(summary.orders[0].items).toEqual([
+        { dishName: 'Món snapshot', unitPrice: 50_000, quantity: 1 },
+      ]);
+      expect(summary.canPay).toBe(status === OrderStatus.SERVED);
+      expect(summary.payableTotal).toBe(
+        status === OrderStatus.PAID || status === OrderStatus.CANCELLED
+          ? 0
+          : 50_000,
+      );
+    },
+  );
+
   it('uses the official signing representation and normalizes local IPv6', () => {
     const internals = service as unknown as {
       sortedData: (values: Record<string, string>) => string;

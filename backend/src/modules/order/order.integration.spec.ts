@@ -165,6 +165,57 @@ describe('Order integration flows', () => {
     );
   });
 
+  test('snapshots every cart line including English name, image, price, quantity and optional note', async () => {
+    Object.assign(dishes[0], {
+      name: 'Cơm chiên bò',
+      nameEn: ' Beef fried rice ',
+      imageUrl: ' /uploads/rice.jpg ',
+      price: 50_000,
+    });
+    sessionService.consumeCartForOrder.mockResolvedValueOnce({
+      _id: new Types.ObjectId(),
+      cart: [
+        { dishId: dishes[0]._id, quantity: 2, note: ' Không hành ' },
+        { dishId: dishes[0]._id, quantity: 1 },
+      ],
+    });
+    await orderService.createCustomerOrder({ tableId: tables[0].id });
+    // A later catalog edit must never rewrite the placed order.
+    Object.assign(dishes[0], {
+      name: 'Tên mới',
+      nameEn: 'New name',
+      imageUrl: '/new.jpg',
+      price: 99_000,
+    });
+    expect(orders[0].items).toHaveLength(2);
+    expect(orders[0].items[0]).toMatchObject({
+      dishName: 'Cơm chiên bò',
+      nameEn: 'Beef fried rice',
+      imageUrl: '/uploads/rice.jpg',
+      unitPrice: 50_000,
+      quantity: 2,
+      note: 'Không hành',
+      status: OrderStatus.PENDING,
+    });
+    expect(orders[0].items[1]).toMatchObject({
+      quantity: 1,
+      unitPrice: 50_000,
+    });
+    expect(orders[0].items[1].note).toBeUndefined();
+    expect(orders[0].totalAmount).toBe(150_000);
+  });
+
+  test('creates an order from a legacy dish without English name or image', async () => {
+    await orderService.createCustomerOrder({ tableId: tables[0].id });
+    expect(orders[0].items[0]).toMatchObject({
+      dishName: 'Test Dish',
+      unitPrice: 10_000,
+      quantity: 2,
+    });
+    expect(orders[0].items[0].nameEn).toBeUndefined();
+    expect(orders[0].items[0].imageUrl).toBeUndefined();
+  });
+
   test('Happy path: place order -> kitchen transitions -> waiter serves, statusHistory recorded', async () => {
     const createRes = await orderService.createCustomerOrder({
       tableId: tables[0]._id.toString(),

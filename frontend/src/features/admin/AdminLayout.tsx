@@ -7,6 +7,7 @@ import {
   LogOut,
   Menu,
   Percent,
+  ReceiptText,
   Soup,
   Tags,
   Users,
@@ -28,6 +29,7 @@ const menuItems = [
   { name: 'Danh mục', path: '/admin/categories', icon: Tags },
   { name: 'Món ăn', path: '/admin/dishes', icon: Soup },
   { name: 'Khuyến mãi', path: '/admin/promotions', icon: Percent },
+  { name: 'Tra cứu hóa đơn', path: '/admin/invoices', icon: ReceiptText },
   { name: 'Người dùng', path: '/admin/users', icon: Users },
 ];
 

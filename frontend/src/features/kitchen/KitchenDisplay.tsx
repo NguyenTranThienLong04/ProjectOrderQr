@@ -1,10 +1,11 @@
+import { OrderNoteMetadata } from '../../components/OrderNoteMetadata';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { BellRing, ChefHat, Clock3, Flame, LoaderCircle, RefreshCw, StickyNote } from 'lucide-react';
 import { orderApi, type KitchenOrder, type KitchenItem } from '../../services/api/order';
 import { EmptyState, Feedback, PageHeader, StatusBadge, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-const socketUrl = import.meta.env.VITE_API_URL || 'http://localhost:3000';
+import { API_URL as socketUrl } from '../../config/api-url';
 const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : 'Vui lòng thử lại.';
 const elapsed = (createdAt?: string, now = Date.now()) => {
   if (!createdAt) return 'Mới nhận';
@@ -65,7 +66,7 @@ export default function KitchenDisplay() {
         <div><p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Bàn</p><h3 className="text-3xl font-black leading-none text-slate-950">{ticket.order.tableDisplayName}</h3></div>
         <div className="text-right"><StatusBadge status={lane} /><p className={`mt-1.5 flex items-center justify-end gap-1 text-sm font-bold tabular-nums ${urgent ? 'text-red-700' : 'text-slate-600'}`}><Clock3 aria-hidden="true" className="h-4 w-4" />{waiting}</p></div>
       </div>
-      <div className="p-4"><div className="flex items-start gap-3"><span className="tabular-nums grid h-11 min-w-11 place-items-center rounded-lg bg-slate-950 px-2 text-xl font-black text-white">{ticket.item.quantity}×</span><div className="min-w-0 flex-1"><p className="text-xl font-bold leading-7 text-slate-950">{ticket.item.dishName}</p>{ticket.item.note && <p className="overflow-wrap-anywhere mt-2 flex items-start gap-2 whitespace-pre-wrap rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-sm font-semibold leading-5 text-amber-950"><StickyNote aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" /><span>{ticket.item.note}</span></p>}</div></div>
+      <div className="p-4"><div className="flex items-start gap-3"><span className="tabular-nums grid h-11 min-w-11 place-items-center rounded-lg bg-slate-950 px-2 text-xl font-black text-white">{ticket.item.quantity}×</span><div className="min-w-0 flex-1"><p className="text-xl font-bold leading-7 text-slate-950">{ticket.item.dishName}</p>{ticket.item.note && <p className="overflow-wrap-anywhere mt-2 flex items-start gap-2 whitespace-pre-wrap rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-sm font-semibold leading-5 text-amber-950"><StickyNote aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" /><span>Ghi chú khách: {ticket.item.note}</span></p>}<OrderNoteMetadata analysis={ticket.item.aiNoteAnalysis} /></div></div>
         <button disabled={isUpdating} onClick={() => void transition(ticket, lane === 'Pending' ? 'Preparing' : 'Ready')} className={`${primaryButtonClass} mt-5 min-h-14 w-full text-base ${lane === 'Pending' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-700 hover:bg-emerald-800'}`}>{isUpdating ? <><LoaderCircle aria-hidden="true" className="h-5 w-5 animate-spin" />Đang cập nhật…</> : lane === 'Pending' ? <><Flame aria-hidden="true" className="h-5 w-5" />Bắt đầu chế biến</> : <><BellRing aria-hidden="true" className="h-5 w-5" />Món đã sẵn sàng</>}</button>
       </div>
     </article>;

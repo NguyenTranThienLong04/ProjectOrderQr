@@ -1,3 +1,7 @@
+import {
+  OrderNoteAnalysis,
+  OrderNoteAnalysisSchema,
+} from '../../common/schemas/order-note-analysis.schema';
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { SessionStatus } from '../../common/enums/session-status.enum';
@@ -23,6 +27,9 @@ export class SessionCartItem {
 
   @Prop({ trim: true, maxlength: 250 })
   note?: string;
+
+  @Prop({ type: OrderNoteAnalysisSchema, default: undefined })
+  aiNoteAnalysis?: OrderNoteAnalysis;
 
   @Prop({ required: true, default: () => new Date() })
   addedAt!: Date;

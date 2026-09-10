@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "noEmit": true, "incremental": false },
+  "include": [
+    "./invoices.e2e-spec.ts",
+    "../src/modules/vnpay/invoice-code.spec.ts",
+    "../src/modules/order/invoice.service.spec.ts"
+  ],
+  "exclude": ["../node_modules"]
+}

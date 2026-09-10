@@ -17,6 +17,10 @@ describe('AppController', () => {
   });
 
   describe('root', () => {
+    it('returns a lightweight health response', () => {
+      expect(appController.health()).toEqual({ status: 'ok' });
+    });
+
     it('should return "Hello World!"', () => {
       expect(appController.getHello()).toBe('Hello World!');
     });

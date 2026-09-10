@@ -1,0 +1,6 @@
+{
+  "rootDir": "../..",
+  "testEnvironment": "node",
+  "testRegex": "scripts/ai-demo/.*\\.spec\\.ts$",
+  "transform": { "^.+\\.(t|j)s$": "ts-jest" }
+}
