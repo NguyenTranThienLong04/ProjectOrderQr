@@ -1,5 +1,4 @@
-import 'dotenv/config';
-import * as dns from 'dns';
+import { testMongoUri, testDatabaseName } from './support/test-database';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -26,8 +25,6 @@ import { MenuController } from '../src/modules/menu/menu.controller';
 import { MenuService } from '../src/modules/menu/menu.service';
 import { CloudinaryService } from '../src/modules/cloudinary/cloudinary.service';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 
 /** Real MongoDB, isolated database, real JWT/RolesGuard/DTO/Multer/service/menu.
@@ -65,14 +62,10 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
   let createdId: string;
 
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production')
-      throw new Error('Catalog test is forbidden in production');
-    if (!process.env.MONGODB_URI)
-      throw new Error('MONGODB_URI is required for the real database test');
     const fixture = await Test.createTestingModule({
       imports: [
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
-          dbName: 'smartorder_phase15_test',
+        MongooseModule.forRoot(testMongoUri(), {
+          dbName: testDatabaseName(),
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,
         }),

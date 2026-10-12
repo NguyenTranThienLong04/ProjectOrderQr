@@ -1,5 +1,6 @@
 import type { OrderNoteAnalysis } from './ai';
 import { axiosClient } from "./axios-client";
+import { customerEntryHeaders, customerToken, saveCustomerGrant, SessionScopeError, type CustomerGrant } from '../customer-access';
 
 export interface PublicDish {
   _id: string;
@@ -32,6 +33,9 @@ export interface PublicMenu {
 
 export interface CreateOrderPayload {
   tableId: string;
+  sessionId: string;
+  cartVersion: number;
+  idempotencyKey: string;
   promotionCode?: string;
 }
 
@@ -76,16 +80,27 @@ export const menuApi = {
   get: async (
     tableId: string,
     lang: "vi" | "en" = "vi",
+    signal?: AbortSignal,
   ): Promise<PublicMenu> => {
     const response = await axiosClient.get<PublicMenu>("/menu", {
       params: { tableId, lang },
+      signal, timeout: 10_000,
     });
     return response.data;
   },
-  getActiveSession: async (tableId: string): Promise<SharedCart> => {
-    const response = await axiosClient.get<SharedCart>("/sessions/active", {
-      params: { tableId },
+  getActiveSession: async (tableId: string, sessionId?: string, signal?: AbortSignal): Promise<SharedCart> => {
+    const previousToken = sessionId ? customerToken(sessionId, tableId) : '';
+    const response = await axiosClient.get<SharedCart & CustomerGrant>("/sessions/active", {
+      params: { tableId, sessionId },
+      headers: customerEntryHeaders(tableId),
+      skipAuthRefresh: true,
+      signal, timeout: 10_000,
     });
+    if (sessionId && response.data.sessionId !== sessionId) throw new SessionScopeError();
+    // A cancelled read or newer Socket grant must not replace current auth scope.
+    if (!signal?.aborted && (!sessionId || customerToken(sessionId, tableId) === previousToken)) {
+      saveCustomerGrant(response.data);
+    }
     return response.data;
   },
   createOrder: async (payload: CreateOrderPayload): Promise<CreatedOrder> => {

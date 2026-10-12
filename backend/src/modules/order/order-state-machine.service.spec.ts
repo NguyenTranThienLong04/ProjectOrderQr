@@ -18,6 +18,31 @@ describe('OrderStateMachineService', () => {
       findOne: jest.fn(),
       exists: jest.fn().mockResolvedValue(null),
     };
+    mockModel.findOne.mockImplementation((query: any) =>
+      mockModel.findById(query._id),
+    );
+    mockModel.findOneAndUpdate = jest.fn((query: any, update: any) => ({
+      exec: async () => {
+        const order = await mockModel.findOne(query).exec();
+        for (const [path, value] of Object.entries(update.$set ?? {})) {
+          const parts = path.split('.');
+          const key = parts.pop()!;
+          const target = parts.reduce(
+            (object: any, part) => object[part],
+            order,
+          );
+          target[key] = value;
+        }
+        for (const [path, value] of Object.entries(update.$push ?? {})) {
+          const history = path
+            .split('.')
+            .reduce((object: any, part) => object[part], order);
+          history.push(value);
+        }
+        order.__v = (order.__v ?? 0) + 1;
+        return order;
+      },
+    }));
     service = new OrderStateMachineService(mockModel, {
       updateMany: jest.fn(() => ({
         exec: jest.fn().mockResolvedValue({ modifiedCount: 1 }),
@@ -47,7 +72,8 @@ describe('OrderStateMachineService', () => {
       { id: '507f1f77bcf86cd799439011', role: UserRole.KITCHEN },
     );
     expect(order.items[0].status).toBe(OrderStatus.PREPARING);
-    expect(order.save).toHaveBeenCalled();
+    expect(mockModel.findOneAndUpdate).toHaveBeenCalled();
+    expect(order.save).not.toHaveBeenCalled();
 
     // Preparing -> Ready
     const res2 = await service.transitionItem('o1', itemId, OrderStatus.READY, {
@@ -152,6 +178,7 @@ describe('OrderStateMachineService', () => {
     const itemId = 'item3';
     const order: any = {
       _id: 'o3',
+      status: OrderStatus.PENDING,
       items: [{ _id: itemId, status: OrderStatus.PENDING, statusHistory: [] }],
       save: jest.fn(),
     };
@@ -170,6 +197,7 @@ describe('OrderStateMachineService', () => {
     const itemId = 'item4';
     const order: any = {
       _id: 'o4',
+      status: OrderStatus.PENDING,
       items: [{ _id: itemId, status: OrderStatus.PENDING, statusHistory: [] }],
       save: jest.fn(),
     };
@@ -199,7 +227,7 @@ describe('OrderStateMachineService', () => {
     expect(order.status).toBe(OrderStatus.CANCELLED);
   });
 
-  test('Admin can cancel any order via cancelByAdmin', async () => {
+  test('Admin can cancel a nonterminal order via cancelByAdmin', async () => {
     const order: any = {
       _id: 'o6',
       status: OrderStatus.READY,
@@ -247,6 +275,7 @@ describe('OrderStateMachineService', () => {
       sessionId,
       status: OrderStatus.SERVED,
       items: [{ status: OrderStatus.SERVED }],
+      totalAmount: 175_000,
     }));
     const findChain = () => {
       const chain: any = {
@@ -287,7 +316,10 @@ describe('OrderStateMachineService', () => {
       {
         _id: { $in: orderIds },
         sessionId,
-        status: OrderStatus.SERVED,
+        status: { $in: [OrderStatus.SERVED] },
+        items: {
+          $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+        },
       },
       expect.objectContaining({
         $set: expect.objectContaining({ status: OrderStatus.PAID }),
@@ -311,10 +343,12 @@ describe('OrderStateMachineService', () => {
         {
           status: OrderStatus.SERVED,
           items: [{ status: OrderStatus.SERVED }],
+          totalAmount: 50_000,
         },
         {
           status: OrderStatus.READY,
           items: [{ status: OrderStatus.READY }],
+          totalAmount: 50_000,
         },
       ]),
     };

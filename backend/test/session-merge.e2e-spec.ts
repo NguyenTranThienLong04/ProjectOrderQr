@@ -2,7 +2,6 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
-import * as dns from 'dns';
 import { Model, Types } from 'mongoose';
 import { AppModule } from '../src/app.module';
 import { AuthService } from '../src/modules/auth/auth.service';
@@ -27,15 +26,6 @@ const tableCodes = ['A01', 'A02', 'A03', 'A04', 'A05'];
 const categoryName = '__phase7_merge_test__';
 const dishNames = ['__phase7_merge_dish_1__', '__phase7_merge_dish_2__'];
 const waiterEmail = '__phase7_merge_waiter__@test.local';
-
-// E2E boots AppModule directly instead of main.ts, so honor the same explicit
-// local opt-in before Mongoose resolves an Atlas SRV URI.
-if (process.env.CUSTOM_DNS_SERVERS) {
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
-  console.warn(
-    `[Phase 7] Using custom DNS servers: ${process.env.CUSTOM_DNS_SERVERS}`,
-  );
-}
 
 describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
   let app: INestApplication;
@@ -90,34 +80,11 @@ describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
   };
 
   async function seed() {
-    const oldTables = await tableModel
-      .find({ tableCode: { $in: tableCodes } })
-      .select('_id')
-      .exec();
-    const oldTableIds = oldTables.map((item) => item._id);
-    const oldSessions = await sessionModel
-      .find({
-        $or: [
-          { tableId: { $in: oldTableIds } },
-          { tableIds: { $in: oldTableIds } },
-          { preMergeTableIds: { $in: oldTableIds } },
-        ],
-      })
-      .select('_id')
-      .exec();
-    await orderModel
-      .deleteMany({
-        $or: [
-          { tableId: { $in: oldTableIds } },
-          { sessionId: { $in: oldSessions.map((item) => item._id) } },
-        ],
-      })
-      .exec();
-    await sessionModel
-      .deleteMany({ _id: { $in: oldSessions.map((item) => item._id) } })
-      .exec();
-    await tableModel.deleteMany({ _id: { $in: oldTableIds } }).exec();
-    await dishModel.deleteMany({ name: { $in: dishNames } }).exec();
+    // Clear only fixture collections on the database allocated to this suite.
+    // Preserve the staff fixture used by the HTTP token across cases.
+    for (const model of [orderModel, sessionModel, tableModel, dishModel]) {
+      await model.deleteMany({}).exec(); // Driver cleanup guard is installed by Jest.
+    }
     let category = await categoryModel.findOne({ name: categoryName }).exec();
     if (!category)
       category = await categoryModel.create({
@@ -165,10 +132,6 @@ describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
   }
 
   beforeAll(async () => {
-    if (!process.env.MONGODB_URI)
-      throw new Error(
-        'Phase 7 e2e requires MONGODB_URI for a real MongoDB deployment.',
-      );
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

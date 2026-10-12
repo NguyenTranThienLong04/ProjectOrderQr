@@ -7,6 +7,7 @@ import {
   Param,
   Body,
   Post,
+  Headers,
 } from '@nestjs/common';
 import { GetActiveSessionDto } from './dto/get-active-session.dto';
 import { MoveSessionDto } from './dto/move-session.dto';
@@ -19,22 +20,40 @@ import { RolesGuard } from '../../common/guards/roles.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { AppGateway } from '../../gateway/app.gateway';
+import { SocketAuthService } from '../../gateway/socket-auth.service';
 
-/** Public because a QR table identifies a customer; no staff JWT is required for active session. */
+/** Customer entry requires the signed QR or an existing session capability. */
 @Controller('sessions')
 export class SessionController {
   constructor(
     private readonly sessionService: SessionService,
     private readonly appGateway: AppGateway,
+    private readonly socketAuth: SocketAuthService,
   ) {}
 
   @Get('active')
-  async getActive(@Query() query: GetActiveSessionDto) {
-    const session = await this.sessionService.getOrCreateActiveSession(
+  async getActive(
+    @Query() query: GetActiveSessionDto,
+    @Headers('x-table-token') tableToken?: string,
+    @Headers('x-customer-token') customerToken?: string,
+  ) {
+    const existing = await this.socketAuth.authorizeEntry(
       query.tableId,
+      tableToken,
+      customerToken,
     );
+    const scopedSessionId = existing?.sessionId ?? query.sessionId;
+    const session = scopedSessionId
+      ? await this.sessionService.getCart(scopedSessionId)
+      : await this.sessionService.getOrCreateActiveSession(query.tableId);
     this.appGateway.emit(['waiter', 'admin'], 'tables:updated');
-    return session;
+    return {
+      ...session,
+      ...(await this.socketAuth.issueCustomer(
+        session.sessionId,
+        query.tableId,
+      )),
+    };
   }
 
   @Get('table-operation-options')

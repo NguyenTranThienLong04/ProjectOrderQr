@@ -7,6 +7,7 @@ import { model } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { JwtStrategy } from '../../auth/jwt.strategy';
+import { UserService } from '../../user/user.service';
 import { AdminService } from '../../admin/admin.service';
 import { Order } from '../../order/order.schema';
 import { Table } from '../../table/table.schema';
@@ -33,8 +34,18 @@ describe('Phase 21 HTTP RBAC, allowlist, grounding and audit (mock provider/pers
   const steps: MockAiStep[] = [];
   const secret = 'phase21-test-only',
     jwt = new JwtService({ secret });
+  const authUsers = ['admin', 'kitchen', 'waiter'].map((role, index) => ({
+    id: (index + 1).toString().padStart(24, '0'),
+    email: 'test@example.invalid',
+    fullName: `Test ${role}`,
+    role,
+  }));
   const auth = (role = 'admin') =>
-    `Bearer ${jwt.sign({ sub: 'test', email: 'test@example.invalid', role })}`;
+    `Bearer ${jwt.sign({
+      sub: authUsers.find((user) => user.role === role)?.id ?? 'f'.repeat(24),
+      email: 'test@example.invalid',
+      role,
+    })}`;
   const admin = {
     getRevenue: jest.fn(),
     getTopDishes: jest.fn(),
@@ -82,7 +93,16 @@ describe('Phase 21 HTTP RBAC, allowlist, grounding and audit (mock provider/pers
       .mockResolvedValue({ acknowledged: true, insertedId: new audit()._id });
     let builder = Test.createTestingModule({
       imports: [ConfigModule, AdminAnalyticsAiModule],
-      providers: [JwtStrategy],
+      providers: [
+        JwtStrategy,
+        {
+          provide: UserService,
+          useValue: {
+            findActiveAuthUser: async (id: string) =>
+              authUsers.find((user) => user.id === id) ?? null,
+          },
+        },
+      ],
     })
       .overrideProvider(ConfigService)
       .useValue(config)
@@ -116,7 +136,8 @@ describe('Phase 21 HTTP RBAC, allowlist, grounding and audit (mock provider/pers
         .post('/ai/admin/analytics/query')
         .set('Authorization', auth(role))
         .send({ query: 'q' })
-        .expect(403);
+        // Customers have no current staff account; other staff lack admin rights.
+        .expect(role === 'customer' ? 401 : 403);
     expect(provider.calls).toHaveLength(0);
     expect(admin.getRevenue).not.toHaveBeenCalled();
   });

@@ -1,14 +1,17 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
-import { Connection, Model, Types } from 'mongoose';
+import { ClientSession, Connection, Model, Types } from 'mongoose';
+import { frontendUrl } from '../../common/config/public-urls';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { AppGateway } from '../../gateway/app.gateway';
@@ -22,6 +25,7 @@ import {
   PaymentIntent,
   PaymentIntentDocument,
   PaymentIntentStatus,
+  UNRESOLVED_PAYMENT_FILTER,
 } from './payment-intent.schema';
 
 type VnpayParams = Record<string, string | undefined>;
@@ -66,7 +70,7 @@ export interface SessionPaymentSummary {
 }
 
 @Injectable()
-export class VnpayService {
+export class VnpayService implements OnModuleInit {
   private readonly logger = new Logger(VnpayService.name);
 
   constructor(
@@ -82,6 +86,12 @@ export class VnpayService {
     private readonly gateway: AppGateway,
     private readonly invoiceService: InvoiceLookupService,
   ) {}
+
+  async onModuleInit() {
+    // Never accept checkout traffic before the cross-instance constraints exist.
+    // Existing ambiguous overlaps must be resolved before these indexes can build.
+    await this.paymentIntentModel.createIndexes();
+  }
 
   private getRequiredConfig(key: string): string {
     const value = this.config.get<string>(key)?.trim();
@@ -164,6 +174,15 @@ export class VnpayService {
     params: VnpayParams,
     diagnosticStage?: 'return' | 'ipn',
   ): boolean {
+    if (
+      Object.entries(params).some(
+        ([key, value]) =>
+          key.startsWith('vnp_') &&
+          value !== undefined &&
+          typeof value !== 'string',
+      )
+    )
+      return false;
     const received = params.vnp_SecureHash;
     if (!received || !/^[a-fA-F0-9]{128}$/.test(received)) return false;
     const expected = this.sign(params);
@@ -186,22 +205,23 @@ export class VnpayService {
   private async assertOwnedActiveSession(
     sessionId: string,
     tableId: string,
+    mongoSession?: ClientSession,
   ): Promise<{ session: SessionDocument; table: TableDocument }> {
     this.assertObjectIds(sessionId, tableId);
     const sessionObjectId = new Types.ObjectId(sessionId);
     const tableObjectId = new Types.ObjectId(tableId);
-    const [session, table] = await Promise.all([
-      this.sessionModel
-        .findOne({
-          _id: sessionObjectId,
-          status: SessionStatus.ACTIVE,
-          $or: [{ tableId: tableObjectId }, { tableIds: tableObjectId }],
-        })
-        .exec(),
-      this.tableModel
-        .findOne({ _id: tableObjectId, currentSessionId: sessionObjectId })
-        .exec(),
-    ]);
+    const session = await this.sessionModel
+      .findOne({
+        _id: sessionObjectId,
+        status: SessionStatus.ACTIVE,
+        $or: [{ tableId: tableObjectId }, { tableIds: tableObjectId }],
+      })
+      .session(mongoSession ?? null)
+      .exec();
+    const table = await this.tableModel
+      .findOne({ _id: tableObjectId, currentSessionId: sessionObjectId })
+      .session(mongoSession ?? null)
+      .exec();
     if (!session || !table)
       throw new NotFoundException('Không tìm thấy phiên ăn thuộc bàn này');
     return { session, table };
@@ -250,11 +270,20 @@ export class VnpayService {
     };
   }
 
-  private async loadSessionBilling(sessionId: string, tableId: string) {
-    const ownership = await this.assertOwnedActiveSession(sessionId, tableId);
+  private async loadSessionBilling(
+    sessionId: string,
+    tableId: string,
+    mongoSession?: ClientSession,
+  ) {
+    const ownership = await this.assertOwnedActiveSession(
+      sessionId,
+      tableId,
+      mongoSession,
+    );
     const orderDocuments = await this.orderModel
       .find({ sessionId: ownership.session._id })
       .sort({ createdAt: 1 })
+      .session(mongoSession ?? null)
       .exec();
     const orders = orderDocuments.map((order, index) =>
       this.summarizeOrder(order, index + 1),
@@ -339,68 +368,177 @@ export class VnpayService {
     amount: number;
     coveredOrderIds: string[];
   }> {
-    const billing = await this.loadSessionBilling(sessionId, tableId);
-    if (!billing.summary.canPay) {
-      throw new BadRequestException(billing.summary.eligibilityMessage);
-    }
-    if (
-      !Number.isSafeInteger(billing.summary.payableTotal) ||
-      billing.summary.payableTotal <= 0
-    ) {
-      throw new BadRequestException(
-        'Tổng tiền phiên ăn không hợp lệ để thanh toán',
+    let coverageKey: string | undefined;
+    try {
+      const result = await withInvoiceCodeRetry((invoiceCode) =>
+        this.connection.transaction(
+          async (mongoSession) => {
+            const billing = await this.loadSessionBilling(
+              sessionId,
+              tableId,
+              mongoSession,
+            );
+            const coveredOrderIds = billing.payableDocuments.map(
+              (order) => order._id,
+            );
+            coverageKey = `${billing.session.id}:${coveredOrderIds.map(String).sort().join('.')}`;
+            const existing = await this.paymentIntentModel
+              .findOne({
+                sessionId: billing.session._id,
+                ...UNRESOLVED_PAYMENT_FILTER,
+              })
+              .session(mongoSession)
+              .exec();
+            if (existing)
+              return {
+                intent: this.reuseCheckout(existing, coverageKey),
+                paidOrders: [],
+              };
+            // A retry after a zero settlement returns the persisted receipt.
+            if (billing.summary.fullyPaid) {
+              const settled = await this.paymentIntentModel
+                .findOne({
+                  sessionId: billing.session._id,
+                  status: PaymentIntentStatus.SUCCEEDED,
+                  paymentMethod: 'internal_zero',
+                })
+                .sort({ createdAt: -1 })
+                .session(mongoSession)
+                .exec();
+              if (settled) return { intent: settled, paidOrders: [] };
+            }
+            if (!billing.summary.canPay)
+              throw new BadRequestException(billing.summary.eligibilityMessage);
+            const amount = billing.summary.payableTotal;
+            if (
+              !Number.isSafeInteger(amount * 100) ||
+              amount < 0 ||
+              billing.payableDocuments.some(
+                (order) =>
+                  !Number.isSafeInteger(order.totalAmount) ||
+                  order.totalAmount < 0,
+              )
+            )
+              throw new BadRequestException(
+                'Tổng tiền phiên ăn không hợp lệ để thanh toán',
+              );
+
+            // Fence the snapshot against concurrent payment/cancel/ownership writes.
+            // A mere transactional read would permit a stale checkout after IPN commit.
+            const claimed = await this.orderModel
+              .updateMany(
+                {
+                  _id: { $in: coveredOrderIds },
+                  sessionId: billing.session._id,
+                  status: OrderStatus.SERVED,
+                },
+                { $inc: { __v: 1 } },
+                { session: mongoSession },
+              )
+              .exec();
+            if (claimed.modifiedCount !== coveredOrderIds.length)
+              throw new ConflictException('Đơn vừa thay đổi, vui lòng thử lại');
+
+            const now = new Date();
+            const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
+            const txnRef = `${billing.session.id}${Date.now()}${randomBytes(3).toString('hex')}`;
+            const paymentUrl =
+              amount === 0
+                ? `${frontendUrl()}/menu?tableId=${billing.table.id}`
+                : this.providerPaymentUrl(
+                    txnRef,
+                    billing.session.id,
+                    amount,
+                    ipAddress,
+                    now,
+                    expiresAt,
+                  );
+            const intent = await new this.paymentIntentModel({
+              invoiceCode,
+              txnRef,
+              coverageKey,
+              sessionId: billing.session._id,
+              tableId: billing.table._id,
+              coveredOrderIds,
+              amount,
+              paymentMethod: amount === 0 ? 'internal_zero' : 'vnpay',
+              paymentUrl,
+              status: PaymentIntentStatus.PENDING,
+              expiresAt,
+            }).save({ session: mongoSession });
+            return amount === 0
+              ? this.settleIntent(intent, 'internal_zero', mongoSession)
+              : { intent, paidOrders: [] };
+          },
+          {
+            readConcern: { level: 'snapshot' },
+            writeConcern: { w: 'majority' },
+          },
+        ),
+      );
+      if (result.paidOrders.length)
+        await this.notifySettlement(result.intent, result.paidOrders);
+      return this.checkoutResult(result.intent, tableId);
+    } catch (error) {
+      if ((error as { code?: number }).code !== 11000) throw error;
+      const winner = await this.paymentIntentModel
+        .findOne({
+          sessionId: new Types.ObjectId(sessionId),
+          ...UNRESOLVED_PAYMENT_FILTER,
+        })
+        .exec();
+      if (winner)
+        return this.checkoutResult(
+          this.reuseCheckout(winner, coverageKey!),
+          tableId,
+        );
+      throw new ConflictException(
+        'Một đơn đang thuộc checkout khác; vui lòng kiểm tra trạng thái thanh toán',
       );
     }
+  }
 
-    const now = new Date();
-    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
-    const coveredOrderIds = billing.payableDocuments.map((order) => order._id);
-    const coverageKey = `${billing.session.id}:${coveredOrderIds
-      .map((id) => id.toString())
-      .sort()
-      .join('.')}`;
-    await this.paymentIntentModel
-      .updateMany(
-        {
-          coverageKey,
-          status: PaymentIntentStatus.PENDING,
-          expiresAt: { $lte: now },
-        },
-        {
-          $set: {
-            status: PaymentIntentStatus.FAILED,
-            responseCode: 'expired',
-            completedAt: now,
-          },
-        },
-      )
-      .exec();
-    const existingIntent = await this.paymentIntentModel
-      .findOne({
-        coverageKey,
-        status: PaymentIntentStatus.PENDING,
-        expiresAt: { $gt: now },
-      })
-      .exec();
-    if (existingIntent) {
-      return {
-        paymentUrl: existingIntent.paymentUrl,
-        txnRef: existingIntent.txnRef,
-        amount: existingIntent.amount,
-        coveredOrderIds: existingIntent.coveredOrderIds.map((id) =>
-          id.toString(),
-        ),
-      };
-    }
-    const txnRef = `${billing.session.id}${Date.now()}${randomBytes(3).toString('hex')}`;
+  private reuseCheckout(intent: PaymentIntentDocument, coverageKey: string) {
+    if (
+      intent.coverageKey !== coverageKey ||
+      intent.status !== PaymentIntentStatus.PENDING ||
+      intent.expiresAt.getTime() <= Date.now()
+    )
+      throw new ConflictException(
+        'Checkout trước chưa được VNPAY xác nhận; chưa thể tạo checkout mới',
+      );
+    return intent;
+  }
+
+  private checkoutResult(intent: PaymentIntentDocument, tableId: string) {
+    return {
+      // A merged-session retry may come from another authorized physical table.
+      paymentUrl:
+        intent.paymentMethod === 'internal_zero'
+          ? `${frontendUrl()}/menu?tableId=${tableId}`
+          : intent.paymentUrl,
+      txnRef: intent.txnRef,
+      amount: intent.amount,
+      coveredOrderIds: intent.coveredOrderIds.map((id) => id.toString()),
+    };
+  }
+
+  private providerPaymentUrl(
+    txnRef: string,
+    sessionId: string,
+    amount: number,
+    ipAddress: string,
+    now: Date,
+    expiresAt: Date,
+  ) {
     const params: VnpayParams = {
       vnp_Version: '2.1.0',
       vnp_Command: 'pay',
       vnp_TmnCode: this.getRequiredConfig('VNP_TMN_CODE'),
-      vnp_Amount: String(billing.summary.payableTotal * 100),
+      vnp_Amount: String(amount * 100),
       vnp_CurrCode: 'VND',
       vnp_TxnRef: txnRef,
-      vnp_OrderInfo: `Thanh toan phien ${billing.session.id}`,
+      vnp_OrderInfo: `Thanh toan phien ${sessionId}`,
       vnp_OrderType: 'other',
       vnp_Locale: 'vn',
       vnp_ReturnUrl: this.getRequiredConfig('VNP_RETURN_URL'),
@@ -409,50 +547,9 @@ export class VnpayService {
       vnp_ExpireDate: this.vnpDate(expiresAt),
     };
     const secureHash = this.sign(params);
-    const paymentUrl = `${this.getRequiredConfig('VNP_URL')}?${this.sortedData(params)}&vnp_SecureHash=${secureHash}`;
-
-    // Persist the exact cutoff before redirecting. A later Order in the same
-    // Session is intentionally absent and can never be paid by this txnRef.
-    let intent: PaymentIntentDocument;
-    try {
-      intent = await withInvoiceCodeRetry(
-        (invoiceCode) =>
-          new this.paymentIntentModel({
-            invoiceCode,
-            txnRef,
-            coverageKey,
-            sessionId: billing.session._id,
-            tableId: billing.table._id,
-            coveredOrderIds,
-            amount: billing.summary.payableTotal,
-            paymentUrl,
-            status: PaymentIntentStatus.PENDING,
-            expiresAt,
-          }).save(),
-        now,
-      );
-    } catch (error) {
-      // The partial unique index makes two simultaneous checkout clicks converge
-      // on the one intent that won the insert race.
-      if ((error as { code?: number }).code !== 11000) throw error;
-      const winner = await this.paymentIntentModel
-        .findOne({ coverageKey, status: PaymentIntentStatus.PENDING })
-        .exec();
-      if (!winner) throw error;
-      return {
-        paymentUrl: winner.paymentUrl,
-        txnRef: winner.txnRef,
-        amount: winner.amount,
-        coveredOrderIds: winner.coveredOrderIds.map((id) => id.toString()),
-      };
-    }
-    this.logDiagnostics('create', params, secureHash, paymentUrl);
-    return {
-      paymentUrl,
-      txnRef: intent.txnRef,
-      amount: intent.amount,
-      coveredOrderIds: intent.coveredOrderIds.map((id) => id.toString()),
-    };
+    const url = `${this.getRequiredConfig('VNP_URL')}?${this.sortedData(params)}&vnp_SecureHash=${secureHash}`;
+    this.logDiagnostics('create', params, secureHash, url);
+    return url;
   }
 
   async handleReturn(params: VnpayParams): Promise<{
@@ -464,23 +561,7 @@ export class VnpayService {
     if (!txnRef) return null;
     const intent = await this.paymentIntentModel.findOne({ txnRef }).exec();
     if (!intent) return null;
-    if (
-      params.vnp_ResponseCode !== '00' &&
-      intent.status === PaymentIntentStatus.PENDING
-    ) {
-      await this.paymentIntentModel
-        .updateOne(
-          { _id: intent._id, status: PaymentIntentStatus.PENDING },
-          {
-            $set: {
-              status: PaymentIntentStatus.FAILED,
-              responseCode: params.vnp_ResponseCode ?? 'missing',
-              completedAt: new Date(),
-            },
-          },
-        )
-        .exec();
-    }
+    // Browser navigation is informational, never proof that a charge failed.
     return {
       txnRef: intent.txnRef,
       sessionId: intent.sessionId.toString(),
@@ -508,6 +589,10 @@ export class VnpayService {
 
   async getPaymentStatus(txnRef: string, sessionId: string, tableId: string) {
     const intent = await this.findOwnedIntent(txnRef, sessionId, tableId);
+    const status =
+      intent.status === PaymentIntentStatus.FAILED && !intent.ipnConfirmed
+        ? PaymentIntentStatus.PENDING
+        : intent.status;
     return {
       invoiceCode:
         intent.status === PaymentIntentStatus.SUCCEEDED
@@ -515,10 +600,11 @@ export class VnpayService {
           : intent.invoiceCode,
       txnRef: intent.txnRef,
       sessionId: intent.sessionId.toString(),
-      status: intent.status,
+      status,
       amount: intent.amount,
       coveredOrderIds: intent.coveredOrderIds.map((id) => id.toString()),
-      completedAt: intent.completedAt,
+      completedAt:
+        status === PaymentIntentStatus.PENDING ? null : intent.completedAt,
       transactionNo: intent.transactionNo,
     };
   }
@@ -546,143 +632,189 @@ export class VnpayService {
   }
 
   async handleIpn(params: VnpayParams): Promise<IpnResponse> {
-    if (!this.verifySignature(params, 'ipn'))
-      return { RspCode: '97', Message: 'Invalid signature' };
-    const txnRef = params.vnp_TxnRef;
-    if (!txnRef) return { RspCode: '01', Message: 'Payment intent not found' };
-    const initialIntent = await this.paymentIntentModel
-      .findOne({ txnRef })
-      .exec();
-    if (!initialIntent)
-      return { RspCode: '01', Message: 'Payment intent not found' };
-    if (initialIntent.status === PaymentIntentStatus.SUCCEEDED)
-      return { RspCode: '02', Message: 'Order already confirmed' };
-
-    const receivedAmount = Number(params.vnp_Amount);
-    if (
-      !Number.isSafeInteger(receivedAmount) ||
-      receivedAmount !== initialIntent.amount * 100
-    ) {
-      this.logger.warn(
-        `Rejected VNPAY IPN with invalid amount for intent ${txnRef}: ${params.vnp_Amount}`,
-      );
-      return { RspCode: '04', Message: 'Invalid amount' };
-    }
-    if (params.vnp_ResponseCode !== '00') {
-      await this.paymentIntentModel
-        .updateOne(
-          { _id: initialIntent._id, status: PaymentIntentStatus.PENDING },
-          {
-            $set: {
-              status: PaymentIntentStatus.FAILED,
-              responseCode: params.vnp_ResponseCode ?? 'missing',
-              completedAt: new Date(),
-            },
-          },
-        )
-        .exec();
-      return { RspCode: '00', Message: 'Confirm Success' };
-    }
-    if (initialIntent.status !== PaymentIntentStatus.PENDING)
-      return { RspCode: '02', Message: 'Order already confirmed' };
-
-    let paidOrders: OrderDocument[] = [];
     try {
-      await this.connection.transaction(async (mongoSession) => {
-        const intent = await this.paymentIntentModel
-          .findOne({
-            _id: initialIntent._id,
-            status: PaymentIntentStatus.PENDING,
-          })
-          .session(mongoSession)
-          .exec();
-        if (!intent)
-          throw new BadRequestException('Giao dịch đã được xử lý trước đó');
+      if (
+        !this.verifySignature(params, 'ipn') ||
+        params.vnp_TmnCode !== this.getRequiredConfig('VNP_TMN_CODE')
+      )
+        return { RspCode: '97', Message: 'Invalid signature' };
+      if (!params.vnp_TxnRef)
+        return { RspCode: '01', Message: 'Payment intent not found' };
+      const success =
+        params.vnp_ResponseCode === '00' &&
+        params.vnp_TransactionStatus === '00';
+      const failure =
+        /^\d{2}$/.test(params.vnp_ResponseCode ?? '') &&
+        params.vnp_ResponseCode !== '00' &&
+        params.vnp_TransactionStatus === '02';
+      if (
+        (!success && !failure) ||
+        !/^\d+$/.test(params.vnp_TransactionNo ?? '') ||
+        (success && /^0+$/.test(params.vnp_TransactionNo!))
+      )
+        return { RspCode: '99', Message: 'Unresolved provider result' };
 
-        paidOrders = await this.stateMachine.transitionManyToPaid(
-          intent.coveredOrderIds,
-          intent.sessionId,
-          {
-            triggeredBy: 'vnpay_webhook',
-            transactionNo: params.vnp_TransactionNo,
-            amount: intent.amount,
-          },
+      const result = await this.connection.transaction(
+        async (
           mongoSession,
-        );
-        const changedAt = new Date();
-        const update = await this.paymentIntentModel
-          .findOneAndUpdate(
-            { _id: intent._id, status: PaymentIntentStatus.PENDING },
-            {
-              $set: {
-                status: PaymentIntentStatus.SUCCEEDED,
-                responseCode: params.vnp_ResponseCode,
-                transactionNo: params.vnp_TransactionNo,
-                completedAt: changedAt,
-              },
-            },
-            { new: true, session: mongoSession },
+        ): Promise<{
+          response: IpnResponse;
+          intent?: PaymentIntentDocument;
+          paidOrders?: OrderDocument[];
+        }> => {
+          const intent = await this.paymentIntentModel
+            .findOne({ txnRef: params.vnp_TxnRef })
+            .session(mongoSession)
+            .exec();
+          if (
+            !intent ||
+            intent.paymentMethod === 'internal_zero' ||
+            intent.amount === 0
           )
-          .exec();
-        if (!update)
-          throw new BadRequestException('Giao dịch đã được xử lý trước đó');
-      });
-    } catch (error) {
-      const latest = await this.paymentIntentModel
-        .findById(initialIntent._id)
-        .exec();
-      if (latest?.status === PaymentIntentStatus.SUCCEEDED)
-        return { RspCode: '02', Message: 'Order already confirmed' };
-      this.logger.warn(
-        `Could not settle payment intent ${txnRef}: ${error instanceof Error ? error.message : String(error)}`,
+            return {
+              response: { RspCode: '01', Message: 'Payment intent not found' },
+            };
+          const receivedAmount = Number(params.vnp_Amount);
+          if (
+            !/^\d+$/.test(params.vnp_Amount ?? '') ||
+            !Number.isSafeInteger(receivedAmount) ||
+            receivedAmount !== intent.amount * 100
+          )
+            return { response: { RspCode: '04', Message: 'Invalid amount' } };
+          if (
+            intent.status === PaymentIntentStatus.SUCCEEDED ||
+            intent.ipnConfirmed
+          ) {
+            const matches =
+              success === (intent.status === PaymentIntentStatus.SUCCEEDED) &&
+              intent.responseCode === params.vnp_ResponseCode &&
+              intent.transactionNo === params.vnp_TransactionNo;
+            return {
+              response: matches
+                ? { RspCode: '02', Message: 'Order already confirmed' }
+                : { RspCode: '99', Message: 'Conflicting provider result' },
+            };
+          }
+          // Local expiry and browser failures do not veto a verified late receipt.
+          if (success)
+            return {
+              response: { RspCode: '00', Message: 'Confirm Success' },
+              ...(await this.settleIntent(
+                intent,
+                'vnpay_webhook',
+                mongoSession,
+                params.vnp_TransactionNo,
+              )),
+            };
+          const updated = await this.paymentIntentModel
+            .findOneAndUpdate(
+              { _id: intent._id, ...UNRESOLVED_PAYMENT_FILTER },
+              {
+                $set: {
+                  status: PaymentIntentStatus.FAILED,
+                  ipnConfirmed: true,
+                  responseCode: params.vnp_ResponseCode,
+                  transactionNo: params.vnp_TransactionNo,
+                  completedAt: new Date(),
+                },
+              },
+              { returnDocument: 'after', session: mongoSession },
+            )
+            .exec();
+          if (!updated) throw new ConflictException('Giao dịch vừa thay đổi');
+          return { response: { RspCode: '00', Message: 'Confirm Success' } };
+        },
+        { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } },
       );
-      return { RspCode: '02', Message: 'Order already confirmed' };
+      if (result.intent && result.paidOrders)
+        await this.notifySettlement(result.intent, result.paidOrders);
+      return result.response;
+    } catch (error) {
+      this.logger.warn(
+        `Could not confirm payment intent ${params.vnp_TxnRef}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      // Includes DB read/write/commit failures. 99 keeps VNPAY's IPN retry active.
+      return { RspCode: '99', Message: 'Temporary confirmation error' };
     }
+  }
 
-    const completedIntent = await this.paymentIntentModel
-      .findById(initialIntent._id)
+  private async settleIntent(
+    intent: PaymentIntentDocument,
+    source: 'vnpay_webhook' | 'internal_zero',
+    mongoSession: ClientSession,
+    transactionNo?: string,
+  ) {
+    const paidOrders = await this.stateMachine.transitionManyToPaid(
+      intent.coveredOrderIds,
+      intent.sessionId,
+      { triggeredBy: source, transactionNo, amount: intent.amount },
+      mongoSession,
+    );
+    const completed = await this.paymentIntentModel
+      .findOneAndUpdate(
+        { _id: intent._id, ...UNRESOLVED_PAYMENT_FILTER },
+        {
+          $set: {
+            status: PaymentIntentStatus.SUCCEEDED,
+            responseCode: '00',
+            ipnConfirmed: source === 'vnpay_webhook',
+            transactionNo,
+            completedAt: new Date(),
+          },
+        },
+        { returnDocument: 'after', session: mongoSession },
+      )
       .exec();
-    if (
-      !completedIntent ||
-      completedIntent.status !== PaymentIntentStatus.SUCCEEDED
-    )
-      return { RspCode: '02', Message: 'Order already confirmed' };
-    const session = await this.sessionModel
-      .findById(completedIntent.sessionId)
-      .exec();
-    const tableIds = (
-      session?.tableIds?.length
-        ? session.tableIds
-        : session
-          ? [session.tableId]
-          : [completedIntent.tableId]
-    ).map((id) => id.toString());
-    const rooms = [
-      'waiter',
-      `session:${completedIntent.sessionId.toString()}`,
-      ...tableIds.map((id) => `table:${id}`),
-    ];
-    const paymentPayload = {
-      txnRef: completedIntent.txnRef,
-      sessionId: completedIntent.sessionId.toString(),
-      status: PaymentIntentStatus.SUCCEEDED,
-      amount: completedIntent.amount,
-      coveredOrderIds: completedIntent.coveredOrderIds.map((id) =>
-        id.toString(),
-      ),
-      transactionNo: completedIntent.transactionNo,
-    };
-    this.gateway.emit(rooms, 'session:payment-updated', paymentPayload);
-    for (const order of paidOrders) {
-      this.gateway.emit(rooms, 'order:paid', {
-        ...paymentPayload,
-        orderId: order.id,
-        tableId: order.tableId.toString(),
-      });
-      this.gateway.emit(rooms, 'order:updated', order);
+    if (!completed) throw new ConflictException('Giao dịch vừa thay đổi');
+    return { intent: completed, paidOrders };
+  }
+
+  private async notifySettlement(
+    completedIntent: PaymentIntentDocument,
+    paidOrders: OrderDocument[],
+  ) {
+    try {
+      const session = await this.sessionModel
+        .findById(completedIntent.sessionId)
+        .exec();
+      const tableIds = (
+        session?.tableIds?.length
+          ? session.tableIds
+          : session
+            ? [session.tableId]
+            : [completedIntent.tableId]
+      ).map((id) => id.toString());
+      const rooms = [
+        'waiter',
+        `session:${completedIntent.sessionId.toString()}`,
+        ...tableIds.map((id) => `table:${id}`),
+      ];
+      const paymentPayload = {
+        txnRef: completedIntent.txnRef,
+        sessionId: completedIntent.sessionId.toString(),
+        status: PaymentIntentStatus.SUCCEEDED,
+        amount: completedIntent.amount,
+        coveredOrderIds: completedIntent.coveredOrderIds.map((id) =>
+          id.toString(),
+        ),
+        transactionNo: completedIntent.transactionNo,
+      };
+      await this.gateway.emit(rooms, 'session:payment-updated', paymentPayload);
+      for (const order of paidOrders) {
+        await this.gateway.emit(rooms, 'order:paid', {
+          ...paymentPayload,
+          orderId: order.id,
+          tableId: order.tableId.toString(),
+        });
+        await this.gateway.emit(rooms, 'order:updated', order);
+      }
+      await this.gateway.emit(['waiter', 'admin'], 'tables:updated');
+    } catch (error) {
+      // The receipt is already committed; notification errors cannot undo it.
+      this.logger.warn(
+        `Payment committed but notification failed: ${String(error)}`,
+      );
     }
-    this.gateway.emit(['waiter', 'admin'], 'tables:updated');
-    return { RspCode: '00', Message: 'Confirm Success' };
   }
 
   private vnpDate(date: Date): string {

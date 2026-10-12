@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   CircleX,
@@ -6,48 +6,40 @@ import {
   LoaderCircle,
   ReceiptText,
 } from 'lucide-react';
-import { io } from 'socket.io-client';
+import { createCustomerSocket } from '../../services/socket-client';
+import { customerScopeTable } from '../../services/customer-access';
 import { paymentApi } from '../../services/api/payment';
 import { secondaryButtonClass } from '../../components/ui';
+import { createPaymentRecovery, type PaymentRecoveryStatus } from '../../services/payment-recovery';
+import { bindSnapshotRecovery } from '../../services/snapshot-refresh';
 
-import { API_URL as socketUrl } from '../../config/api-url';
 
 export function PaymentResult() {
   const params = new URLSearchParams(window.location.search);
-  const initialResult = params.get('result');
   const txnRef = params.get('txnRef') ?? '';
   const tableId = params.get('tableId') ?? '';
   const sessionId = params.get('sessionId') ?? '';
-  const [status, setStatus] = useState<'failed' | 'pending' | 'paid'>(
-    initialResult === 'failed' ? 'failed' : 'pending',
-  );
+  const [status, setStatus] = useState<PaymentRecoveryStatus>('pending');
+  const recoveryRef = useRef<ReturnType<typeof createPaymentRecovery> | null>(null);
   const [invoiceError, setInvoiceError] = useState('');
   const [invoiceCode, setInvoiceCode] = useState<string>();
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
-    if (!txnRef || !tableId || !sessionId || initialResult === 'failed') return;
-    let active = true;
-    let joined = false;
-    let checked = false;
-    const socket = io(socketUrl);
-    const checkOnceReady = async () => {
-      if (!active || checked || !joined) return;
-      checked = true;
-      try {
-        const payment = await paymentApi.getPaymentStatus(
-          txnRef,
-          sessionId,
-          tableId,
-        );
-        if (!active) return;
-        setInvoiceCode(payment.invoiceCode);
-        if (payment.status === 'succeeded') setStatus('paid');
-        if (payment.status === 'failed') setStatus('failed');
-      } catch {
-        // The signed browser return is informational; IPN/socket remains authoritative.
-      }
-    };
+    setInvoiceCode(undefined);
+    if (!txnRef || !tableId || !sessionId) { setStatus('unknown'); return; }
+    const recovery = createPaymentRecovery(
+      async (signal) => {
+        const payment = await paymentApi.getPaymentStatus(txnRef, sessionId, tableId, signal);
+        if (payment.txnRef !== txnRef || payment.sessionId !== sessionId) throw new Error('Payment scope mismatch');
+        return payment;
+      },
+      (next, payment) => { setStatus(next); if (payment) setInvoiceCode(payment.invoiceCode); },
+    );
+    recoveryRef.current = recovery;
+    void recovery.check(); // Independent of Socket connection, room join, or URL result.
+    const socket = createCustomerSocket(customerScopeTable(sessionId, tableId), sessionId);
+    const unbind = bindSnapshotRecovery(socket, recovery.recheck, () => socket.emit('join', { room: `session:${sessionId}` }));
     const updatePayment = (payment: {
       txnRef?: string;
       sessionId?: string;
@@ -55,29 +47,18 @@ export function PaymentResult() {
     }) => {
       if (
         payment.txnRef === txnRef &&
-        payment.sessionId === sessionId &&
-        payment.status === 'succeeded'
+        payment.sessionId === sessionId
       ) {
-        setStatus('paid');
+        void recovery.recheck();
       }
     };
-    socket.on('connect', () =>
-      socket.emit('join', { room: `session:${sessionId}` }),
-    );
-    socket.on('joined', (payload: { room?: string }) => {
-      if (payload.room !== `session:${sessionId}`) return;
-      joined = true;
-      void checkOnceReady();
-    });
     socket.on('session:payment-updated', updatePayment);
     return () => {
-      active = false;
-      socket.off('connect');
-      socket.off('joined');
-      socket.off('session:payment-updated', updatePayment);
+      recovery.dispose(); recoveryRef.current = null; unbind();
+      socket.removeAllListeners();
       socket.disconnect();
     };
-  }, [txnRef, tableId, sessionId, initialResult]);
+  }, [txnRef, tableId, sessionId]);
 
   const downloadInvoice = async () => {
     setInvoiceError('');
@@ -106,10 +87,17 @@ export function PaymentResult() {
             text: 'Giao dịch bị hủy hoặc thất bại. Phiên ăn và toàn bộ đơn vẫn được giữ nguyên để bạn thanh toán lại.',
             color: 'bg-red-50 text-red-700',
           }
-        : {
+        : status === 'unknown' ? {
+            icon: Clock3,
+            title: 'Chưa xác minh được thanh toán',
+            text: txnRef && tableId && sessionId
+              ? 'Chưa nhận được kết quả cuối cùng từ hệ thống. Hãy kiểm tra lại hoặc liên hệ nhân viên trước khi thanh toán thêm.'
+              : 'Thiếu thông tin giao dịch để kiểm tra. Vui lòng liên hệ nhân viên để xác minh.',
+            color: 'bg-amber-50 text-amber-700',
+          } : {
             icon: Clock3,
             title: 'Đang xác nhận thanh toán',
-            text: 'Hệ thống đang chờ IPN xác thực từ VNPAY. Không cần tải lại trang.',
+            text: 'Đang kiểm tra kết quả thanh toán với hệ thống. Vui lòng chờ trong giây lát.',
             color: 'bg-blue-50 text-blue-700',
           };
   const Icon = config.icon;
@@ -132,7 +120,8 @@ export function PaymentResult() {
         <h1 className="mt-5 text-2xl font-bold text-stone-950">
           {config.title}
         </h1>
-        <p className="mt-3 text-sm leading-6 text-stone-600">{config.text}</p>
+        <p role="status" className="mt-3 text-sm leading-6 text-stone-600">{config.text}</p>
+        {status === 'unknown' && txnRef && sessionId && tableId && <button className={`${secondaryButtonClass} mt-4 w-full`} onClick={() => void recoveryRef.current?.check()}>Kiểm tra lại</button>}
         {status === 'paid' && invoiceCode && <p className="mt-3 break-words text-sm font-semibold">Mã hóa đơn: {invoiceCode}</p>}
         {status === 'paid' && txnRef && sessionId && tableId && (
           <button
@@ -151,13 +140,13 @@ export function PaymentResult() {
         )}
         <a
           className="mt-3 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-accent-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-accent-500"
-          href={tableId ? `/menu?tableId=${encodeURIComponent(tableId)}` : '/menu'}
+          href={tableId ? `/menu?tableId=${encodeURIComponent(customerScopeTable(sessionId, tableId))}&sessionId=${encodeURIComponent(sessionId)}` : '/menu'}
         >
           Quay lại menu tại bàn
         </a>
         {status === 'pending' && (
           <p className="mt-4 text-xs text-stone-500">
-            Trạng thái sẽ cập nhật theo thời gian thực khi IPN được xác nhận.
+            Kết quả được kiểm tra qua HTTP ngay cả khi mất kết nối cập nhật trực tiếp.
           </p>
         )}
       </section>

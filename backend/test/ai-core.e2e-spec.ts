@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -30,8 +29,6 @@ import {
 } from '../src/modules/ai/testing/ai-test.fixture';
 import { Table } from '../src/modules/table/table.schema';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 @Module({})
 class IsolatedAiCoreDatabaseModule {}
@@ -43,7 +40,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
   let audits: Model<AiInteraction>;
   let service: AiOrchestratorService;
   const tableId = new Types.ObjectId();
-  const dbName = `smartorder_p17_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const config = new ConfigService({
     ...validAiEnv,
     AI_ENABLED: 'false',
@@ -52,8 +49,6 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
   const provider = new MockAiProvider([new AiError('AI_PROVIDER_UNAVAILABLE')]);
 
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error('Requires dev/test Mongo; DB name is always overridden');
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
@@ -62,7 +57,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
       .useModule({
         module: IsolatedAiCoreDatabaseModule,
         imports: [
-          MongooseModule.forRoot(process.env.MONGODB_URI, {
+          MongooseModule.forRoot(testMongoUri(), {
             dbName,
             retryAttempts: 0,
             serverSelectionTimeoutMS: 15000,

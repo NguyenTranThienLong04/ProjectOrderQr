@@ -20,6 +20,9 @@ export class Table {
   @Prop({ required: true })
   qrCodeUrl!: string;
 
+  @Prop()
+  menuUrl?: string;
+
   @Prop({ type: Types.ObjectId, ref: 'Session', default: null })
   currentSessionId?: Types.ObjectId | null;
 

@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -35,12 +34,10 @@ import { Table, TableSchema } from '../src/modules/table/table.schema';
 import { MenuController } from '../src/modules/menu/menu.controller';
 import { MenuService } from '../src/modules/menu/menu.service';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 
 describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
-  const dbName = `smartorder_p18_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const categoryId = new Types.ObjectId();
   const dishId = new Types.ObjectId();
   const tableId = new Types.ObjectId();
@@ -81,17 +78,13 @@ describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
     });
 
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production and MONGODB_URI; test DB always overridden',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
     const fixture = await Test.createTestingModule({
       imports: [
         ConfigModule,
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,

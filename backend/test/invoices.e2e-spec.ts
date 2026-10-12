@@ -1,6 +1,4 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import crypto from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -37,12 +35,10 @@ import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
 import { AbandonedSessionCleanupService } from '../src/modules/session/abandoned-session-cleanup.service';
 import { InvoiceDetailDto } from '../src/modules/invoice/dto/invoice.dto';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 
 describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
-  const dbName = `smartorder_invoices_${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
+  const dbName = testDatabaseName();
   const secret = 'invoice-integration-only';
   const jwt = new JwtService({ secret });
   let app: INestApplication<App>, connection: Connection;
@@ -88,14 +84,10 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
   };
 
   beforeAll(async () => {
-    if (!process.env.MONGODB_URI || process.env.NODE_ENV === 'production')
-      throw new Error(
-        'Requires non-production Mongo connection; isolated dbName only',
-      );
     const fixture = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({ isGlobal: true }),
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,
@@ -180,10 +172,7 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
   });
   afterEach(() => jest.restoreAllMocks());
   afterAll(async () => {
-    if (
-      connection?.name === dbName &&
-      dbName.startsWith('smartorder_invoices_')
-    )
+    if (connection?.name === dbName && dbName === testDatabaseName())
       await connection.dropDatabase();
     await app?.close();
   });

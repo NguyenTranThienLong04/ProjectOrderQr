@@ -92,6 +92,14 @@ export class Session {
   @Prop({ type: [Types.ObjectId], ref: 'Table', default: [] })
   preMergeTableIds!: Types.ObjectId[];
 
+  /** Exact ownership snapshot; an Order's original table may have since moved. */
+  @Prop({ type: [Types.ObjectId], ref: 'Order', default: undefined })
+  preMergeOrderIds?: Types.ObjectId[];
+
+  /** Descendants reparented to the root, restored together on unmerge. */
+  @Prop({ type: [Types.ObjectId], ref: 'Session', default: undefined })
+  preMergeDescendantSessionIds?: Types.ObjectId[];
+
   @Prop({ type: Date, default: null })
   mergedAt?: Date | null;
 }

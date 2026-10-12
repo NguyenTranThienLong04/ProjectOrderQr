@@ -14,6 +14,15 @@ import { UserRole } from '../../common/enums/user-role.enum';
 describe('Order integration flows', () => {
   let orderService: OrderService;
   let stateMachine: OrderStateMachineService;
+  let ownerSessionId: Types.ObjectId;
+
+  const createOrder = (dto: { tableId: string }) =>
+    orderService.createCustomerOrder({
+      ...dto,
+      sessionId: ownerSessionId.toString(),
+      cartVersion: 0,
+      idempotencyKey: `${ownerSessionId}:0`,
+    });
 
   // In-memory stores
   const tables: any[] = [];
@@ -23,6 +32,9 @@ describe('Order integration flows', () => {
   // Mock models
   const tableModel = {
     findById: jest.fn((id: string) => ({
+      session() {
+        return this;
+      },
       exec: jest
         .fn()
         .mockResolvedValue(tables.find((t) => t._id.toString() === id)),
@@ -49,6 +61,9 @@ describe('Order integration flows', () => {
   } as any;
   const dishModel = {
     find: jest.fn((query: any) => ({
+      session() {
+        return this;
+      },
       exec: jest
         .fn()
         .mockResolvedValue(
@@ -61,6 +76,10 @@ describe('Order integration flows', () => {
 
   // Order model mock as constructor with save
   class MockOrderModel {
+    static db = {
+      transaction: async (callback: (session: object) => unknown) =>
+        callback({}),
+    };
     constructor(public payload: any) {
       Object.assign(this, payload);
     }
@@ -80,6 +99,8 @@ describe('Order integration flows', () => {
     static find(query: any) {
       const exec = async () =>
         orders.filter((o) => {
+          if (query.status?.$in && !query.status.$in.includes(o.status))
+            return false;
           const itemStatus = query['items.status'];
           if (itemStatus?.$in)
             return o.items.some((it: any) =>
@@ -96,12 +117,46 @@ describe('Order integration flows', () => {
     }
     static findOne(query: any) {
       const exec = async () =>
-        orders.find(
-          (o) =>
-            o._id.toString() === query._id.toString() &&
-            o.sessionId.toString() === query.sessionId.toString(),
+        orders.find((o) =>
+          query.idempotencyKey
+            ? o.idempotencyKey === query.idempotencyKey
+            : o._id.toString() === query._id.toString() &&
+              (!query.sessionId ||
+                o.sessionId.toString() === query.sessionId.toString()),
         );
-      return { exec, select: () => ({ exec }) };
+      return { exec, select: () => ({ exec }), session: () => ({ exec }) };
+    }
+    static findOneAndUpdate(query: any, update: any) {
+      return {
+        exec: async () => {
+          const order = await this.findOne(query).exec();
+          if (
+            !order ||
+            order.status !== query.status ||
+            (typeof query.__v === 'number'
+              ? order.__v !== query.__v
+              : order.__v !== undefined)
+          )
+            return null;
+          for (const [path, value] of Object.entries(update.$set ?? {})) {
+            const parts = path.split('.');
+            const key = parts.pop()!;
+            const target = parts.reduce(
+              (object: any, part) => object[part],
+              order,
+            );
+            target[key] = value;
+          }
+          for (const [path, value] of Object.entries(update.$push ?? {})) {
+            const history = path
+              .split('.')
+              .reduce((object: any, part) => object[part], order);
+            history.push(value);
+          }
+          order.__v = (order.__v ?? 0) + 1;
+          return order;
+        },
+      };
     }
   }
 
@@ -110,7 +165,7 @@ describe('Order integration flows', () => {
     consumeCartForOrder: jest.fn(async (tableId: any) => {
       // find active session by tableId
       return {
-        _id: new Types.ObjectId(),
+        _id: ownerSessionId,
         tableId: tables[0]._id,
         cart: [{ dishId: dishes[0]._id.toString(), quantity: 2, note: '' }],
       };
@@ -128,6 +183,7 @@ describe('Order integration flows', () => {
   } as any;
 
   beforeEach(() => {
+    ownerSessionId = new Types.ObjectId();
     // reset stores
     tables.length = 0;
     dishes.length = 0;
@@ -173,13 +229,13 @@ describe('Order integration flows', () => {
       price: 50_000,
     });
     sessionService.consumeCartForOrder.mockResolvedValueOnce({
-      _id: new Types.ObjectId(),
+      _id: ownerSessionId,
       cart: [
         { dishId: dishes[0]._id, quantity: 2, note: ' Không hành ' },
         { dishId: dishes[0]._id, quantity: 1 },
       ],
     });
-    await orderService.createCustomerOrder({ tableId: tables[0].id });
+    await createOrder({ tableId: tables[0].id });
     // A later catalog edit must never rewrite the placed order.
     Object.assign(dishes[0], {
       name: 'Tên mới',
@@ -206,7 +262,7 @@ describe('Order integration flows', () => {
   });
 
   test('creates an order from a legacy dish without English name or image', async () => {
-    await orderService.createCustomerOrder({ tableId: tables[0].id });
+    await createOrder({ tableId: tables[0].id });
     expect(orders[0].items[0]).toMatchObject({
       dishName: 'Test Dish',
       unitPrice: 10_000,
@@ -217,7 +273,7 @@ describe('Order integration flows', () => {
   });
 
   test('Happy path: place order -> kitchen transitions -> waiter serves, statusHistory recorded', async () => {
-    const createRes = await orderService.createCustomerOrder({
+    const createRes = await createOrder({
       tableId: tables[0]._id.toString(),
     });
     expect(createRes.status).toBe(OrderStatus.PENDING);
@@ -262,7 +318,7 @@ describe('Order integration flows', () => {
   });
 
   test('Negative flows: waiter cannot set Preparing; kitchen cannot jump Pending->Ready; customer cannot cancel after preparing', async () => {
-    const createRes = await orderService.createCustomerOrder({
+    const createRes = await createOrder({
       tableId: tables[0]._id.toString(),
     });
     const created = orders[0];
@@ -306,7 +362,6 @@ describe('Order integration flows', () => {
   });
 
   test('snapshots separate notes for the same dish and exposes them to Kitchen', async () => {
-    const ownerSessionId = new Types.ObjectId();
     sessionService.consumeCartForOrder.mockResolvedValueOnce({
       _id: ownerSessionId,
       id: ownerSessionId.toString(),
@@ -317,7 +372,7 @@ describe('Order integration flows', () => {
       ],
     });
 
-    await orderService.createCustomerOrder({
+    await createOrder({
       tableId: tables[0]._id.toString(),
     });
 
@@ -336,7 +391,7 @@ describe('Order integration flows', () => {
   });
 
   test('uses the current merged Session label while preserving the Order source tableId', async () => {
-    await orderService.createCustomerOrder({
+    await createOrder({
       tableId: tables[0]._id.toString(),
     });
     const sourceTableId = tables[0]._id;
@@ -366,7 +421,7 @@ describe('Order integration flows', () => {
   });
 
   test('payment status is readable only by the owning active session', async () => {
-    await orderService.createCustomerOrder({
+    await createOrder({
       tableId: tables[0]._id.toString(),
     });
     const created = orders[0];

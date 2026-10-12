@@ -4,7 +4,9 @@ import { MenuRecommendations } from './MenuRecommendations';
 import { useMenuSearch } from './use-menu-search';
 import { OrderNoteMetadata } from '../../components/OrderNoteMetadata';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { io, type Socket } from 'socket.io-client';
+import { type Socket } from 'socket.io-client';
+import { createCustomerSocket } from '../../services/socket-client';
+import { newerCart, startCustomerRecovery, type CustomerScope } from '../../services/customer-recovery';
 import {
   BellRing,
   ChefHat,
@@ -29,7 +31,6 @@ import { ReviewFeedback } from './ReviewFeedback';
 import { OrderProgress } from './OrderProgress';
 
 const currency = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' });
-import { API_URL as socketUrl } from '../../config/api-url';
 
 function apiMessage(error: unknown, fallback: string) {
   return (error as { response?: { data?: { message?: string } } }).response?.data?.message ?? fallback;
@@ -40,6 +41,10 @@ export function CustomerMenu() {
   const [lang, setLang] = useState<'vi' | 'en'>(() => new URLSearchParams(window.location.search).get('lang') === 'en' ? 'en' : 'vi');
   const [menu, setMenu] = useState<PublicMenu | null>(null);
   const [sharedCart, setSharedCart] = useState<SharedCart | null>(null);
+  const [scope, setScope] = useState<CustomerScope | null>(null);
+  const scopeRef = useRef<CustomerScope | null>(null);
+  const cartRef = useRef<SharedCart | null>(null);
+  const recoveryRef = useRef<ReturnType<typeof startCustomerRecovery> | null>(null);
   const menuSearch = useMenuSearch(tableId, lang);
   const search = menuSearch.query;
   const setSearch = menuSearch.reset;
@@ -64,76 +69,74 @@ export function CustomerMenu() {
   const [isApplyingPromotion, setIsApplyingPromotion] = useState(false);
   const socketRef = useRef<Socket | null>(null);
   const cartDialogRef = useRef<HTMLElement | null>(null);
-  const menuLoadRef = useRef<{ key: string; request: Promise<void> } | null>(null);
-  const paymentSummaryRequestRef = useRef<{ key: string; request: Promise<SessionPaymentSummary> } | null>(null);
-  const queuedPaymentRefreshRef = useRef<{ sessionId: string; tableId: string } | null>(null);
-
-  const refreshPaymentSummary = useCallback((sessionId: string, ownerTableId = tableId, queueIfBusy = false): Promise<SessionPaymentSummary> => {
-    const key = `${sessionId}:${ownerTableId}`;
-    const existing = paymentSummaryRequestRef.current;
-    if (existing?.key === key) {
-      if (queueIfBusy) queuedPaymentRefreshRef.current = { sessionId, tableId: ownerTableId };
-      return existing.request;
-    }
-    const request = paymentApi.getSessionSummary(sessionId, ownerTableId)
-      .then((summary) => { setPaymentSummary(summary); return summary; })
-      .finally(() => {
-        if (paymentSummaryRequestRef.current?.request !== request) return;
-        paymentSummaryRequestRef.current = null;
-        const queued = queuedPaymentRefreshRef.current;
-        queuedPaymentRefreshRef.current = null;
-        if (queued) void refreshPaymentSummary(queued.sessionId, queued.tableId);
-      });
-    paymentSummaryRequestRef.current = { key, request };
-    return request;
-  }, [tableId]);
+  const menuLoadRef = useRef<{ key: string; request: Promise<void>; controller: AbortController } | null>(null);
 
   const loadMenu = useCallback((nextLang = lang) => {
     const normalizedTableId = tableId.trim();
     if (!normalizedTableId) return Promise.resolve();
+    const currentScope = scopeRef.current;
+    // Language changes/retries resume the same session, including a closed one.
+    const sessionId = currentScope?.tableId === normalizedTableId ? currentScope.sessionId
+      : new URLSearchParams(window.location.search).get('sessionId') ?? undefined;
     const requestKey = `${normalizedTableId}:${nextLang}`;
     if (menuLoadRef.current?.key === requestKey) return menuLoadRef.current.request;
-    setIsLoading(true); setError(''); setSharedCart(null); setPaymentSummary(null);
-    const request = Promise.all([menuApi.get(normalizedTableId, nextLang), menuApi.getActiveSession(normalizedTableId)])
-      .then(async ([result, cart]) => {
-        setMenu(result); setSharedCart(cart);
-        await refreshPaymentSummary(cart.sessionId, normalizedTableId);
-        window.history.replaceState(null, '', `/menu?tableId=${encodeURIComponent(normalizedTableId)}&lang=${nextLang}`);
+    menuLoadRef.current?.controller.abort();
+    const controller = new AbortController();
+    setIsLoading(true); setError('');
+    const request = Promise.all([menuApi.get(normalizedTableId, nextLang, controller.signal), menuApi.getActiveSession(normalizedTableId, sessionId, controller.signal)])
+      .then(([result, cart]) => {
+        if (controller.signal.aborted) return;
+        const nextScope = { tableId: normalizedTableId, sessionId: cart.sessionId };
+        scopeRef.current = nextScope; setScope(nextScope);
+        const accepted = newerCart(cartRef.current, cart, cart.sessionId);
+        cartRef.current = accepted; setSharedCart(accepted); setMenu(result);
+        window.history.replaceState(null, '', `/menu?tableId=${encodeURIComponent(normalizedTableId)}&sessionId=${encodeURIComponent(cart.sessionId)}&lang=${nextLang}`);
       })
-      .catch(() => { setMenu(null); setError('Không tìm thấy bàn hoặc chưa thể tải menu. Kiểm tra mã bàn rồi thử lại.'); })
+      .catch(() => { if (!controller.signal.aborted) setError('Không thể mở phiên tại bàn. Vui lòng kiểm tra kết nối hoặc quét lại QR hợp lệ trên bàn.'); })
       .finally(() => {
-        setIsLoading(false);
-        if (menuLoadRef.current?.request === request) menuLoadRef.current = null;
+        if (menuLoadRef.current?.request === request) { setIsLoading(false); menuLoadRef.current = null; }
       });
-    menuLoadRef.current = { key: requestKey, request };
+    menuLoadRef.current = { key: requestKey, request, controller };
     return request;
-  }, [tableId, lang, refreshPaymentSummary]);
+  }, [tableId, lang]);
 
   // QR entry is loaded once; later language/table submissions call loadMenu explicitly.
   // oxlint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { void loadMenu(); }, []);
+  useEffect(() => {
+    void loadMenu();
+    return () => { menuLoadRef.current?.controller.abort(); menuLoadRef.current = null; };
+  }, []);
 
   useEffect(() => {
-    if (!sharedCart?.sessionId) return;
-    const socket = io(socketUrl);
+    if (!scope) return;
+    const socket = createCustomerSocket(scope.tableId, scope.sessionId, (error) => recovery.fail(error));
+    const recovery = startCustomerRecovery(socket, {
+      scope, lang, initialCart: cartRef.current,
+      onCart: (cart) => {
+        const accepted = newerCart(cartRef.current, cart, scope.sessionId);
+        cartRef.current = accepted; setSharedCart(accepted); setIsSyncing(false);
+      },
+      onSnapshot: (menu, summary) => { setMenu(menu); setPaymentSummary(summary); setIsSyncing(false); setError(''); },
+      onScope: (nextScope) => {
+        menuLoadRef.current?.controller.abort();
+        scopeRef.current = nextScope; setScope(nextScope); setTableId(nextScope.tableId);
+        cartRef.current = null; setSharedCart(null); setPaymentSummary(null); setIsSyncing(false);
+        window.history.replaceState(null, '', `/menu?tableId=${encodeURIComponent(nextScope.tableId)}&sessionId=${encodeURIComponent(nextScope.sessionId)}&lang=${lang}`);
+      },
+      onError: (_error, expired) => {
+        setIsSyncing(false); setIsCallingWaiter(false);
+        if (expired) { cartRef.current = null; setSharedCart(null); setPaymentSummary(null); }
+        setError(expired ? 'Phiên tại bàn đã hết hiệu lực hoặc quyền truy cập đã thay đổi. Vui lòng quét lại QR tại bàn.' : 'Chưa đồng bộ được dữ liệu. Kiểm tra kết nối và thử tải lại.');
+      },
+    });
+    recoveryRef.current = recovery;
     socketRef.current = socket;
-    socket.on('connect', () => { socket.emit('cart:join', { sessionId: sharedCart.sessionId }); socket.emit('join', { room: `table:${tableId}` }); });
-    socket.on('cart:synced', (cart: SharedCart) => { setSharedCart(cart); setIsSyncing(false); });
-    socket.on('session:table-added', () => void loadMenu());
-    socket.on('session:merged', () => void loadMenu());
-    socket.on('session:merged_or_moved', () => void loadMenu());
-    socket.on('session:unmerged', () => void loadMenu());
+    socket.on('disconnect', () => { setIsSyncing(false); setIsCallingWaiter(false); });
     socket.on('cart:error', (message: string) => { setError(message); setIsSyncing(false); });
     socket.on('waiter:call:accepted', () => { setIsCallingWaiter(false); setWaiterConfirmOpen(false); setOrderMessage('Yêu cầu đã gửi. Nhân viên phục vụ sẽ đến bàn sớm.'); });
     socket.on('waiter:call:error', (message: string) => { setIsCallingWaiter(false); setError(message); });
-    socket.on('order:updated', () => void refreshPaymentSummary(sharedCart.sessionId, tableId, true));
-    socket.on('session:payment-updated', (payment: { sessionId?: string; status?: string }) => {
-      if (payment.sessionId !== sharedCart.sessionId) return;
-      if (payment.status === 'succeeded') setOrderMessage('VNPAY đã xác nhận thanh toán cho các lượt gọi món trong hóa đơn.');
-      void refreshPaymentSummary(sharedCart.sessionId, tableId);
-    });
-    return () => { socket.removeAllListeners(); socket.disconnect(); socketRef.current = null; };
-  }, [sharedCart?.sessionId, tableId, loadMenu, refreshPaymentSummary]);
+    return () => { recovery.dispose(); socket.removeAllListeners(); socket.disconnect(); socketRef.current = null; recoveryRef.current = null; };
+  }, [scope, lang]);
 
   useEffect(() => {
     if (!isCartOpen) return;
@@ -185,11 +188,18 @@ export function CustomerMenu() {
     finally { setIsApplyingPromotion(false); }
   };
   const submitOrder = async () => {
-    if (!tableId || cart.length === 0) return;
+    if (!tableId || !sharedCart || cart.length === 0 || isOrdering) return;
     setIsOrdering(true); setError('');
     try {
-      const order = await menuApi.createOrder({ tableId, promotionCode: promotionPreview?.code });
-      await refreshPaymentSummary(order.sessionId, tableId);
+      await menuApi.createOrder({
+        tableId,
+        sessionId: sharedCart.sessionId,
+        cartVersion: sharedCart.version,
+        // Stable across devices/reloads while this persisted cart version is unchanged.
+        idempotencyKey: `${sharedCart.sessionId}:${sharedCart.version}`,
+        promotionCode: promotionPreview?.code,
+      });
+      await recoveryRef.current?.refresh();
       setIsCartOpen(false);
       setOrderMessage('Đơn đã được gửi đến bếp. Bạn có thể theo dõi tiến độ ngay bên dưới.');
     } catch (requestError) { setError(apiMessage(requestError, 'Không thể gửi đơn. Vui lòng kiểm tra giỏ hàng và thử lại.')); }
@@ -224,7 +234,7 @@ export function CustomerMenu() {
     <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6 sm:py-7">
       {!menu && <section className="mx-auto mt-8 max-w-lg rounded-xl border border-stone-200 bg-white p-5 sm:p-7"><div className="flex items-start gap-3"><span className="grid h-11 w-11 shrink-0 place-items-center rounded-lg bg-accent-50 text-accent-600"><UtensilsCrossed aria-hidden="true" className="h-5 w-5" /></span><div><h2 className="text-lg font-bold text-stone-950">Mở menu theo bàn</h2><p className="mt-1 text-sm leading-6 text-stone-600">Quét QR đặt trên bàn. Khi thử nghiệm, bạn có thể nhập mã định danh bàn bên dưới.</p></div></div><label htmlFor="table-id" className="mt-5 block text-sm font-semibold text-stone-700">Mã định danh bàn</label><div className="mt-1.5 flex flex-col gap-2 sm:flex-row"><input id="table-id" value={tableId} onChange={(event) => setTableId(event.target.value)} placeholder="Nhập tableId" className={`${controlClass} min-w-0 flex-1`} /><button onClick={() => void loadMenu()} disabled={isLoading || !tableId.trim()} className={primaryButtonClass}>{isLoading && <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" />}{isLoading ? 'Đang tải…' : 'Xem menu'}</button></div></section>}
 
-      <div className="space-y-3">{error && <Feedback tone="danger">{error}</Feedback>}{orderMessage && <Feedback tone="success">{orderMessage}</Feedback>}</div>
+      <div className="space-y-3">{error && <Feedback tone="danger">{error}{sharedCart && <button type="button" onClick={() => void recoveryRef.current?.refresh()} className="ml-2 min-h-11 underline">Tải lại dữ liệu</button>}</Feedback>}{orderMessage && <Feedback tone="success">{orderMessage}</Feedback>}</div>
 
       {menu && <>
         <section className="mb-5 mt-4 grid gap-3 sm:grid-cols-[1fr_auto] sm:items-center">

@@ -1,7 +1,9 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -18,9 +20,10 @@ import { Order, OrderDocument } from './order.schema';
 import { PromotionService } from '../promotion/promotion.service';
 import { ForbiddenException } from '@nestjs/common';
 import { InvoiceService } from './invoice.service';
+import { PROCESSING_ORDER_STATUSES } from './order-transition.rules';
 
 @Injectable()
-export class OrderService {
+export class OrderService implements OnModuleInit {
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(Table.name) private readonly tableModel: Model<TableDocument>,
@@ -32,121 +35,178 @@ export class OrderService {
     private readonly invoiceService: InvoiceService,
   ) {}
 
+  async onModuleInit() {
+    // Wait for the unique index before accepting create-order requests.
+    await this.orderModel.init();
+  }
+
   async createCustomerOrder(createOrderDto: CreateOrderDto) {
-    const table = await this.tableModel.findById(createOrderDto.tableId).exec();
-    if (!table) {
-      throw new NotFoundException('Không tìm thấy bàn');
-    }
-    await this.preflightPromotion(createOrderDto.promotionCode, table.id);
-    // The shared Session cart, not a client payload, is the order source of truth.
-    // Its atomic clear defines a precise cutoff: cart mutations before it are ordered,
-    // while later mutations remain in the new cart for the next order.
-    const session = await this.sessionService.consumeCartForOrder(table.id);
-    const uniqueDishIds = [
-      ...new Set(session.cart.map((item) => item.dishId.toString())),
-    ];
-    const dishes = await this.dishModel
-      .find({ _id: { $in: uniqueDishIds }, isAvailable: true })
-      .exec();
-    if (dishes.length !== uniqueDishIds.length) {
-      throw new BadRequestException(
-        'Một hoặc nhiều món không tồn tại hoặc đã hết món',
-      );
-    }
-    const dishesById = new Map(
-      dishes.map((dish) => [dish._id.toString(), dish]),
-    );
-
-    const now = new Date();
-    const items = session.cart.map((item) => {
-      const dish = dishesById.get(item.dishId.toString());
-      if (!dish) throw new BadRequestException('Món ăn không hợp lệ');
-      const statusHistory = [
-        {
-          fromStatus: null,
-          toStatus: OrderStatus.PENDING,
-          changedBy: { actorType: ActorType.CUSTOMER, sessionId: session._id },
-          changedAt: now,
-        },
-      ];
-      return {
-        dishId: item.dishId,
-        // Re-snapshot from current Dish data after availability validation.
-        dishName: dish.name,
-        nameEn: dish.nameEn?.trim() || undefined,
-        imageUrl: dish.imageUrl?.trim() || undefined,
-        unitPrice: dish.price,
-        quantity: item.quantity,
-        note: item.note?.trim() || undefined,
-        aiNoteAnalysis: item.aiNoteAnalysis,
-        status: OrderStatus.PENDING,
-        statusHistory,
-      };
-    });
-    const subtotalAmount = items.reduce(
-      (total, item) => total + item.unitPrice * item.quantity,
-      0,
-    );
-    const appliedPromotion = await this.promotionService.reserveForOrder(
-      createOrderDto.promotionCode,
-      subtotalAmount,
-      now,
-    );
+    const { idempotencyKey } = createOrderDto;
     try {
-      const order = await new this.orderModel({
-        sessionId: session._id,
-        tableId: table._id,
-        items,
-        status: OrderStatus.PENDING,
-        statusHistory: [
-          {
-            fromStatus: null,
-            toStatus: OrderStatus.PENDING,
-            changedBy: {
-              actorType: ActorType.CUSTOMER,
-              sessionId: session._id,
-            },
-            changedAt: now,
-          },
-        ],
-        subtotalAmount,
-        discountAmount: appliedPromotion.discountAmount,
-        promotionCode: appliedPromotion.code,
-        totalAmount: appliedPromotion.totalAmount,
-        note: createOrderDto.note?.trim(),
-      }).save();
-      // A new Pending order reopens the active session for service, including
-      // every physical table in a merged session.
-      await this.tableModel
-        .updateMany(
-          { currentSessionId: session._id },
-          { $set: { status: TableStatus.OCCUPIED } },
-        )
-        .exec();
+      return await this.orderModel.db.transaction(
+        async (mongoSession) => {
+          const existing = await this.orderModel
+            .findOne({ idempotencyKey })
+            .session(mongoSession)
+            .exec();
+          if (existing)
+            return this.createOrderResult(existing, createOrderDto, true);
 
-      return {
-        orderId: order.id,
-        sessionId: session.id,
-        tableId: table.id,
-        status: order.status,
-        subtotalAmount: order.subtotalAmount,
-        discountAmount: order.discountAmount,
-        promotionCode: order.promotionCode,
-        totalAmount: order.totalAmount,
-        createdAt: now,
-      };
-    } catch (error) {
-      await this.promotionService.releaseReservation(
-        appliedPromotion.promotionId,
+          const table = await this.tableModel
+            .findById(createOrderDto.tableId)
+            .session(mongoSession)
+            .exec();
+          if (!table) {
+            throw new NotFoundException('Không tìm thấy bàn');
+          }
+          // Claim exactly the submitted cart snapshot. Transaction retries cannot consume
+          // a later cart, even if another device adds items after a competing commit.
+          const session = await this.sessionService.consumeCartForOrder(
+            table.id,
+            createOrderDto.sessionId,
+            createOrderDto.cartVersion,
+            mongoSession,
+          );
+          const uniqueDishIds = [
+            ...new Set(session.cart.map((item) => item.dishId.toString())),
+          ];
+          const dishes = await this.dishModel
+            .find({ _id: { $in: uniqueDishIds }, isAvailable: true })
+            .session(mongoSession)
+            .exec();
+          if (dishes.length !== uniqueDishIds.length) {
+            throw new BadRequestException(
+              'Một hoặc nhiều món không tồn tại hoặc đã hết món',
+            );
+          }
+          const dishesById = new Map(
+            dishes.map((dish) => [dish._id.toString(), dish]),
+          );
+
+          const now = new Date();
+          const items = session.cart.map((item) => {
+            const dish = dishesById.get(item.dishId.toString());
+            if (!dish) throw new BadRequestException('Món ăn không hợp lệ');
+            const statusHistory = [
+              {
+                fromStatus: null,
+                toStatus: OrderStatus.PENDING,
+                changedBy: {
+                  actorType: ActorType.CUSTOMER,
+                  sessionId: session._id,
+                },
+                changedAt: now,
+              },
+            ];
+            return {
+              dishId: item.dishId,
+              // Re-snapshot from current Dish data after availability validation.
+              dishName: dish.name,
+              nameEn: dish.nameEn?.trim() || undefined,
+              imageUrl: dish.imageUrl?.trim() || undefined,
+              unitPrice: dish.price,
+              quantity: item.quantity,
+              note: item.note?.trim() || undefined,
+              aiNoteAnalysis: item.aiNoteAnalysis,
+              status: OrderStatus.PENDING,
+              statusHistory,
+            };
+          });
+          const subtotalAmount = items.reduce(
+            (total, item) => total + item.unitPrice * item.quantity,
+            0,
+          );
+          const appliedPromotion = await this.promotionService.reserveForOrder(
+            createOrderDto.promotionCode,
+            subtotalAmount,
+            now,
+            mongoSession,
+          );
+          const order = await new this.orderModel({
+            idempotencyKey,
+            cartVersion: createOrderDto.cartVersion,
+            sessionId: session._id,
+            tableId: table._id,
+            items,
+            status: OrderStatus.PENDING,
+            statusHistory: [
+              {
+                fromStatus: null,
+                toStatus: OrderStatus.PENDING,
+                changedBy: {
+                  actorType: ActorType.CUSTOMER,
+                  sessionId: session._id,
+                },
+                changedAt: now,
+              },
+            ],
+            subtotalAmount,
+            discountAmount: appliedPromotion.discountAmount,
+            promotionCode: appliedPromotion.code,
+            totalAmount: appliedPromotion.totalAmount,
+            note: createOrderDto.note?.trim(),
+          }).save({ session: mongoSession });
+          // A new Pending order reopens the active session for service, including
+          // every physical table in a merged session.
+          await this.tableModel
+            .updateMany(
+              { currentSessionId: session._id },
+              { $set: { status: TableStatus.OCCUPIED } },
+              { session: mongoSession },
+            )
+            .exec();
+
+          return this.createOrderResult(order, createOrderDto, false);
+        },
+        { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } },
       );
+    } catch (error) {
+      // A unique-key race aborts the whole transaction. Read the committed winner
+      // outside that aborted snapshot; all other failures retain their original error.
+      if ((error as { code?: number }).code === 11000) {
+        const existing = await this.orderModel
+          .findOne({ idempotencyKey })
+          .exec();
+        if (existing)
+          return this.createOrderResult(existing, createOrderDto, true);
+      }
       throw error;
     }
+  }
+
+  private createOrderResult(
+    order: OrderDocument,
+    dto: CreateOrderDto,
+    replayed: boolean,
+  ) {
+    if (
+      !order.sessionId.equals(dto.sessionId) ||
+      !order.tableId.equals(dto.tableId) ||
+      order.cartVersion !== dto.cartVersion
+    ) {
+      throw new ConflictException(
+        'Idempotency key đã được sử dụng cho giỏ hàng khác',
+      );
+    }
+    return {
+      orderId: order.id,
+      sessionId: order.sessionId.toString(),
+      tableId: order.tableId.toString(),
+      status: order.status,
+      subtotalAmount: order.subtotalAmount,
+      discountAmount: order.discountAmount,
+      promotionCode: order.promotionCode,
+      totalAmount: order.totalAmount,
+      createdAt: this.getCreatedAt(order),
+      replayed,
+    };
   }
 
   /** Returns orders (with filtered items) relevant for Kitchen UI */
   async listForKitchen() {
     const docs = await this.orderModel
       .find({
+        status: { $in: PROCESSING_ORDER_STATUSES },
         'items.status': { $in: [OrderStatus.PENDING, OrderStatus.PREPARING] },
       })
       .sort({ createdAt: 1 })
@@ -182,7 +242,10 @@ export class OrderService {
   /** Returns orders (with filtered items) relevant for Waiter UI */
   async listForWaiter() {
     const docs = await this.orderModel
-      .find({ 'items.status': OrderStatus.READY })
+      .find({
+        status: { $in: PROCESSING_ORDER_STATUSES },
+        'items.status': OrderStatus.READY,
+      })
       .sort({ createdAt: 1 })
       .exec();
     const tableCodes = await this.getTableCodes(docs);
@@ -353,16 +416,5 @@ export class OrderService {
 
   private getCreatedAt(order: OrderDocument): Date | undefined {
     return (order as OrderDocument & { createdAt?: Date }).createdAt;
-  }
-
-  /** Reject an invalid code before consuming the shared cart, so a failed checkout never clears it. */
-  private async preflightPromotion(
-    promotionCode: string | undefined,
-    tableId: string,
-  ) {
-    if (!promotionCode?.trim()) return;
-    const subtotalAmount =
-      await this.sessionService.getActiveCartSubtotal(tableId);
-    await this.promotionService.preview(promotionCode, subtotalAmount);
   }
 }

@@ -7,7 +7,16 @@ import { JwtService } from '@nestjs/jwt';
 import { UserService } from '../user/user.service';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
+import { createHash, randomUUID } from 'node:crypto';
+import { isMongoId } from 'class-validator';
 import { UserRole } from '../../common/enums/user-role.enum';
+
+interface TokenUser {
+  id: string;
+  email: string;
+  role: UserRole;
+  fullName: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -41,12 +50,11 @@ export class AuthService {
     return null;
   }
 
-  async generateTokens(user: {
-    id: string;
-    email: string;
-    role: string;
-    fullName: string;
-  }) {
+  private fingerprint(token: string): string {
+    return createHash('sha256').update(token, 'utf8').digest('hex');
+  }
+
+  private async signTokens(user: TokenUser) {
     const payload = {
       sub: user.id,
       email: user.email,
@@ -57,16 +65,19 @@ export class AuthService {
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {
         secret: this.accessSecret,
+        algorithm: 'HS256',
         expiresIn: '15m',
       }),
-      this.jwtService.signAsync(payload, {
-        secret: this.refreshSecret,
-        expiresIn: '7d',
-      }),
+      this.jwtService.signAsync(
+        { sub: user.id, tokenUse: 'refresh' },
+        {
+          secret: this.refreshSecret,
+          algorithm: 'HS256',
+          jwtid: randomUUID(),
+          expiresIn: '7d',
+        },
+      ),
     ]);
-
-    // Save refresh token hash in DB
-    await this.userService.updateRefreshToken(user.id, refreshToken);
 
     return {
       accessToken,
@@ -80,8 +91,15 @@ export class AuthService {
     };
   }
 
-  decodeTokenWithoutVerify(token: string): any {
-    return this.jwtService.decode(token);
+  async generateTokens(user: TokenUser) {
+    const tokens = await this.signTokens(user);
+    const stored = await this.userService.storeRefreshToken(
+      user.id,
+      user.role,
+      this.fingerprint(tokens.refreshToken),
+    );
+    if (!stored) throw new UnauthorizedException('Tài khoản không còn hợp lệ');
+    return tokens;
   }
 
   async login(email: string, pass: string) {
@@ -99,40 +117,44 @@ export class AuthService {
     });
   }
 
-  async refreshTokens(userId: string, refreshToken: string) {
-    const user = await this.userService.findByIdWithRefreshToken(userId);
-    if (!user || !user.refreshTokenHash || !user.isActive) {
-      throw new ForbiddenException(
-        'Truy cập bị từ chối hoặc Token không hợp lệ',
-      );
-    }
-
-    // Verify token
+  async refreshTokens(refreshToken: string) {
+    let claims: { sub: string; jti: string; tokenUse: string; exp: number };
+    // Never use identity or touch user state before signature/expiry verification.
     try {
-      await this.jwtService.verifyAsync(refreshToken, {
+      claims = await this.jwtService.verifyAsync(refreshToken, {
         secret: this.refreshSecret,
+        algorithms: ['HS256'],
       });
+      if (
+        typeof claims.sub !== 'string' ||
+        !isMongoId(claims.sub) ||
+        typeof claims.jti !== 'string' ||
+        !claims.jti ||
+        claims.tokenUse !== 'refresh' ||
+        !Number.isFinite(claims.exp)
+      )
+        throw new Error('Invalid refresh claims');
     } catch {
-      // Clear refresh token if verification fails
-      await this.userService.updateRefreshToken(userId, null);
       throw new ForbiddenException('Token hết hạn hoặc không hợp lệ');
     }
 
-    const isMatch = await bcrypt.compare(refreshToken, user.refreshTokenHash);
-    if (!isMatch) {
-      throw new ForbiddenException('Truy cập bị từ chối');
-    }
-
-    return this.generateTokens({
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      fullName: user.fullName,
-    });
+    const user = await this.userService.findActiveAuthUser(claims.sub);
+    if (!user) throw new ForbiddenException('Truy cập bị từ chối');
+    const tokens = await this.signTokens(user);
+    // Signing prepares a candidate; only the atomic CAS winner can return it.
+    const rotated = await this.userService.rotateRefreshToken(
+      user.id,
+      user.role,
+      this.fingerprint(refreshToken),
+      this.fingerprint(tokens.refreshToken),
+    );
+    if (!rotated)
+      throw new ForbiddenException('Refresh token không còn hiệu lực');
+    return tokens;
   }
 
   async logout(userId: string) {
-    await this.userService.updateRefreshToken(userId, null);
+    await this.userService.revokeRefreshToken(userId);
     return { success: true };
   }
 }

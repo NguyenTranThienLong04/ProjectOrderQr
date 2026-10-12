@@ -152,6 +152,7 @@ export class AbandonedSessionCleanupService
     let expired = false;
     try {
       await mongoSession.withTransaction(async () => {
+        expired = false;
         const staleActivity = this.staleActivityFilter(cutoff);
         const session = await this.sessionModel
           .findOne({
@@ -175,6 +176,7 @@ export class AbandonedSessionCleanupService
             {
               _id: session._id,
               status: SessionStatus.ACTIVE,
+              version: session.version,
               ...staleActivity,
             },
             {
@@ -198,7 +200,10 @@ export class AbandonedSessionCleanupService
                 status: TableStatus.AVAILABLE,
                 currentSessionId: null,
                 groupedWithTableIds: [],
+                groupRootTableId: null,
+                groupedAt: null,
               },
+              $inc: { __v: 1 },
             },
             { session: mongoSession },
           )

@@ -2,6 +2,12 @@ import axios from 'axios';
 
 import { API_URL } from '../../config/api-url';
 
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    skipAuthRefresh?: boolean;
+  }
+}
+
 export const axiosClient = axios.create({
   baseURL: API_URL,
   headers: {
@@ -14,26 +20,54 @@ axiosClient.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('accessToken');
     if (token && config.headers) {
-      config.headers.Authorization = `Bearer ${token}`;
+      config.headers.set('Authorization', `Bearer ${token}`);
+    } else {
+      config.headers.delete('Authorization');
     }
     return config;
   },
   (error) => Promise.reject(error),
 );
 
-// Interceptor for responses: handle token refresh
-let isRefreshing = false;
-let failedQueue: any[] = [];
+let authGeneration = 0;
+let refreshPromise: Promise<string> | null = null;
+let logoutPromise: Promise<void> | null = null;
 
-const processQueue = (error: any, token: string | null = null) => {
-  failedQueue.forEach((prom) => {
-    if (error) {
-      prom.reject(error);
-    } else {
-      prom.resolve(token);
+export const clearAuthState = () => {
+  authGeneration += 1;
+  localStorage.removeItem('accessToken');
+  localStorage.removeItem('refreshToken');
+  localStorage.removeItem('user');
+  delete axiosClient.defaults.headers.common.Authorization;
+  delete axiosClient.defaults.headers.common.authorization;
+  if (window.location.pathname !== '/login') window.location.href = '/login';
+};
+
+const refreshAccessToken = (): Promise<string> => {
+  if (refreshPromise) return refreshPromise;
+  const generation = authGeneration;
+  const refreshToken = localStorage.getItem('refreshToken');
+  refreshPromise = (async () => {
+    try {
+      if (!refreshToken) throw new Error('Missing refresh token');
+      const response = await axios.post(`${API_URL}/auth/refresh`, { refreshToken }, { timeout: 10_000 });
+      // Logout or another login must not be undone by a late refresh response.
+      if (generation !== authGeneration || localStorage.getItem('refreshToken') !== refreshToken) {
+        throw new Error('Authentication changed during refresh');
+      }
+      const { accessToken, refreshToken: nextRefreshToken, user } = response.data;
+      localStorage.setItem('accessToken', accessToken);
+      localStorage.setItem('refreshToken', nextRefreshToken);
+      localStorage.setItem('user', JSON.stringify(user));
+      return accessToken;
+    } catch (error) {
+      if (generation === authGeneration && localStorage.getItem('refreshToken') === refreshToken) {
+        clearAuthState();
+      }
+      throw error;
     }
-  });
-  failedQueue = [];
+  })().finally(() => { refreshPromise = null; });
+  return refreshPromise;
 };
 
 axiosClient.interceptors.response.use(
@@ -42,62 +76,42 @@ axiosClient.interceptors.response.use(
     const originalRequest = error.config;
 
     // Avoid infinite loop if auth/login or auth/refresh fails
-    if (originalRequest.url?.includes('/auth/login') || originalRequest.url?.includes('/auth/refresh')) {
+    if (!originalRequest || originalRequest.skipAuthRefresh || originalRequest.url?.includes('/auth/login') || originalRequest.url?.includes('/auth/refresh')) {
       return Promise.reject(error);
     }
 
     if (error.response?.status === 401 && !originalRequest._retry) {
-      if (isRefreshing) {
-        return new Promise((resolve, reject) => {
-          failedQueue.push({ resolve, reject });
-        })
-          .then((token) => {
-            originalRequest.headers.Authorization = `Bearer ${token}`;
-            return axiosClient(originalRequest);
-          })
-          .catch((err) => Promise.reject(err));
-      }
-
       originalRequest._retry = true;
-      isRefreshing = true;
-
-      const refreshToken = localStorage.getItem('refreshToken');
-      if (!refreshToken) {
-        handleLogout();
-        return Promise.reject(error);
+      // A delayed 401 may belong to the access token already replaced by
+      // another request. Reuse the current token before rotating again.
+      let token = localStorage.getItem('accessToken');
+      if (!token || originalRequest.headers.get('Authorization') === `Bearer ${token}`) {
+        token = await refreshAccessToken();
       }
-
-      try {
-        const response = await axios.post(`${API_URL}/auth/refresh`, { refreshToken });
-        const { accessToken: newAccessToken, refreshToken: newRefreshToken } = response.data;
-
-        localStorage.setItem('accessToken', newAccessToken);
-        localStorage.setItem('refreshToken', newRefreshToken);
-
-        axiosClient.defaults.headers.common.Authorization = `Bearer ${newAccessToken}`;
-        originalRequest.headers.Authorization = `Bearer ${newAccessToken}`;
-
-        processQueue(null, newAccessToken);
-        isRefreshing = false;
-
-        return axiosClient(originalRequest);
-      } catch (refreshError) {
-        processQueue(refreshError, null);
-        isRefreshing = false;
-        handleLogout();
-        return Promise.reject(refreshError);
-      }
+      originalRequest.headers.set('Authorization', `Bearer ${token}`);
+      return axiosClient(originalRequest);
     }
 
     return Promise.reject(error);
   },
 );
 
-export const handleLogout = () => {
-  localStorage.removeItem('accessToken');
-  localStorage.removeItem('refreshToken');
-  localStorage.removeItem('user');
-  if (window.location.pathname !== '/login') {
-    window.location.href = '/login';
-  }
+export const logoutAndClear = (): Promise<void> => {
+  if (logoutPromise) return logoutPromise;
+  logoutPromise = (async () => {
+    try {
+      // The normal interceptor can refresh an expired access token first.
+      if (localStorage.getItem('accessToken') || localStorage.getItem('refreshToken')) {
+        await axiosClient.post('/auth/logout', undefined, { timeout: 10_000 });
+      }
+    } finally {
+      clearAuthState();
+    }
+  })().finally(() => { logoutPromise = null; });
+  return logoutPromise;
+};
+
+// Existing layout effects/click handlers expect a synchronous void callback.
+export const handleLogout = (): void => {
+  void logoutAndClear().catch(() => { /* Local cleanup already ran in finally. */ });
 };

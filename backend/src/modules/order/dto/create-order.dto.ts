@@ -1,8 +1,28 @@
-import { IsMongoId, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsInt,
+  IsMongoId,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 export class CreateOrderDto {
   @IsMongoId()
   tableId!: string;
+
+  @IsMongoId()
+  sessionId!: string;
+
+  @IsInt()
+  @Min(0)
+  cartVersion!: number;
+
+  @IsString()
+  @Matches(/^\S+$/)
+  @MaxLength(128)
+  idempotencyKey!: string;
 
   @IsOptional()
   @IsString()

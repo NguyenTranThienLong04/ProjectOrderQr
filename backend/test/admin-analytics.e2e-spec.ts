@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -31,11 +30,9 @@ import { Review } from '../src/modules/review/review.schema';
 import { OrderStatus } from '../src/common/enums/order-status.enum';
 import { buildCatalog } from '../scripts/ai-demo/catalog';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', () => {
-  const dbName = `smartorder_p21_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const secret = 'phase21-integration-test',
     jwt = new JwtService({ secret });
   const authorization = `Bearer ${jwt.sign({ sub: 'fixture', email: 'fixture@example.invalid', role: 'admin' })}`;
@@ -82,17 +79,13 @@ describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', (
       reviews: await reviews.find().sort('_id').lean(),
     });
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production MONGODB_URI; isolated dbName only',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
     const fixture = await Test.createTestingModule({
       imports: [
         ConfigModule,
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,

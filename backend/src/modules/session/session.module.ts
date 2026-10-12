@@ -8,14 +8,21 @@ import { SessionController } from './session.controller';
 import { SessionService } from './session.service';
 import { GatewayModule } from '../../gateway/gateway.module';
 import { AbandonedSessionCleanupService } from './abandoned-session-cleanup.service';
+import { SocketAuthModule } from '../../gateway/socket-auth.module';
+import {
+  PaymentIntent,
+  PaymentIntentSchema,
+} from '../vnpay/payment-intent.schema';
 
 @Module({
   imports: [
+    SocketAuthModule,
     MongooseModule.forFeature([
       { name: Session.name, schema: SessionSchema },
       { name: Table.name, schema: TableSchema },
       { name: Dish.name, schema: DishSchema },
       { name: Order.name, schema: OrderSchema },
+      { name: PaymentIntent.name, schema: PaymentIntentSchema },
     ]),
     forwardRef(() => GatewayModule),
   ],

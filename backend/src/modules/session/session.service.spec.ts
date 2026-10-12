@@ -43,6 +43,9 @@ describe('SessionService active-session resume', () => {
   beforeEach(() => {
     tableModel = {
       findById: jest.fn(() => ({
+        session() {
+          return this;
+        },
         exec: jest.fn().mockResolvedValue({
           _id: tableId,
           id: tableId.toString(),
@@ -79,6 +82,10 @@ describe('SessionService active-session resume', () => {
       tableModel,
       dishModel,
       orderModel,
+      {
+        transaction: async (work: (session: object) => Promise<unknown>) =>
+          work({}),
+      } as never,
       {} as never,
     );
   });
@@ -105,6 +112,9 @@ describe('SessionService active-session resume', () => {
 
   it('does not create a duplicate session when waiting_payment has no restorable active session', async () => {
     tableModel.findById.mockReturnValue({
+      session() {
+        return this;
+      },
       exec: jest.fn().mockResolvedValue({
         _id: tableId,
         id: tableId.toString(),
@@ -169,6 +179,7 @@ describe('SessionService cart item notes', () => {
       sessionModel,
       {} as never,
       dishModel,
+      {} as never,
       {} as never,
       {} as never,
     );

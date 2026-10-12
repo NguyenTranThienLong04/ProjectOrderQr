@@ -12,23 +12,28 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/src/main.js",
-    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "test": "jest",
-    "test:watch": "jest --watch",
-    "test:cov": "jest --coverage",
-    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json",
+    "lint": "eslint \"{src,apps,libs,test}/**/*.ts\"",
+    "test": "jest --config ./test/jest-unit.cjs",
+    "test:watch": "jest --config ./test/jest-unit.cjs --watch",
+    "test:cov": "jest --config ./test/jest-unit.cjs --coverage",
+    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --config ./test/jest-unit.cjs --runInBand",
+    "test:e2e": "jest --config ./test/jest-e2e.cjs",
     "smoke:ai": "ts-node scripts/ai-smoke.ts",
     "eval:ai": "ts-node scripts/ai-evaluation/evaluate.ts",
     "eval:ai:live": "ts-node scripts/ai-evaluation/evaluate.ts --live",
     "test:ai-evaluation": "jest --config ./scripts/ai-evaluation/jest.json --runInBand",
-    "test:ai-release": "jest --config ./test/jest-e2e.json --runInBand --runTestsByPath test/ai-release.e2e-spec.ts",
+    "test:ai-release": "jest --config ./test/jest-e2e.cjs --runInBand --runTestsByPath test/ai-release.e2e-spec.ts",
     "seed:ai-demo": "ts-node scripts/seed-ai-demo.ts seed",
     "reset:ai-demo": "ts-node scripts/seed-ai-demo.ts reset",
     "validate:ai-demo": "ts-node scripts/seed-ai-demo.ts validate",
     "test:ai-demo": "jest --config ./scripts/ai-demo/jest.json --runInBand",
     "seed:admin": "ts-node scripts/seed-admin.ts",
-    "seed:merge-test": "ts-node scripts/seed-merge-test.ts"
+    "seed:merge-test": "ts-node scripts/seed-merge-test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.build.json",
+    "test:unit": "jest --config ./test/jest-unit.cjs --runInBand",
+    "test:unit:ci": "jest --config ./test/jest-unit-ci.cjs --runInBand",
+    "test:integration": "jest --config ./test/jest-integration.cjs",
+    "test:e2e:ci": "jest --config ./test/jest-e2e.cjs --runTestsByPath test/app.e2e-spec.ts test/ai-foundation.e2e-spec.ts test/ai-demo.e2e-spec.ts"
   },
   "dependencies": {
     "@google/genai": "^2.21.0",
@@ -88,22 +93,5 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.3",
     "typescript-eslint": "^8.20.0"
-  },
-  "jest": {
-    "moduleFileExtensions": [
-      "js",
-      "json",
-      "ts"
-    ],
-    "rootDir": "src",
-    "testRegex": ".*\\.spec\\.ts$",
-    "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
-    },
-    "collectCoverageFrom": [
-      "**/*.(t|j)s"
-    ],
-    "coverageDirectory": "../coverage",
-    "testEnvironment": "node"
   }
 }

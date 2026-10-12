@@ -1,5 +1,3 @@
-import 'dotenv/config';
-import * as dns from 'dns';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -22,10 +20,6 @@ import {
   PaymentIntentStatus,
 } from '../src/modules/vnpay/payment-intent.schema';
 import { VnpayService } from '../src/modules/vnpay/vnpay.service';
-
-if (process.env.CUSTOM_DNS_SERVERS) {
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
-}
 
 describe('Session payment (real MongoDB + HTTP IPN)', () => {
   let app: INestApplication;

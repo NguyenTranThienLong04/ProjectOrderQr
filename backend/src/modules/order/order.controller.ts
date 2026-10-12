@@ -35,7 +35,10 @@ export class OrderController {
 
   @Post()
   async create(@Body() createOrderDto: CreateOrderDto) {
-    const result = await this.orderService.createCustomerOrder(createOrderDto);
+    const { replayed, ...result } =
+      await this.orderService.createCustomerOrder(createOrderDto);
+    // The service resolves only after commit; an idempotent replay has no new events.
+    if (replayed) return result;
     await this.appGateway.synchronizeSession(result.sessionId);
     // Ownership follows the merged Session while tableId remains the physical
     // source-table audit reference. Every customer in that Session gets the event.
@@ -123,7 +126,7 @@ export class OrderController {
     return order;
   }
 
-  // Admin override cancel (can cancel at any state)
+  // Admin cancellation still follows the state machine (no terminal transitions).
   @Patch(':orderId/cancel/admin')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)

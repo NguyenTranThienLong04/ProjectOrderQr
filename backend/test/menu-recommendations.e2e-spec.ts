@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import {
   getConnectionToken,
@@ -22,8 +21,6 @@ import { SessionStatus } from '../src/common/enums/session-status.enum';
 import { buildDataset, type Basket } from '../scripts/ai-demo/dataset';
 import { type BasketEvidence } from '../src/modules/menu/recommendation-ranking';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 type Body = {
   result: {
@@ -40,7 +37,7 @@ type Body = {
 const body = (response: { body: unknown }) => response.body as Body;
 
 describe('Phase 23 real Mongo/HTTP with explicitly synthetic Phase 16 baskets', () => {
-  const dbName = `smartorder_p23_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const dataset = buildDataset();
   const baskets = dataset.ai_demo_baskets as Basket[];
   const anchor = dataset.dishes[0]._id;
@@ -81,13 +78,9 @@ describe('Phase 23 real Mongo/HTTP with explicitly synthetic Phase 16 baskets', 
       },
     );
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production configured Mongo host; isolated dbName mandatory',
-      );
     const fixture = await Test.createTestingModule({
       imports: [
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,
@@ -158,7 +151,7 @@ describe('Phase 23 real Mongo/HTTP with explicitly synthetic Phase 16 baskets', 
     if (
       connection &&
       connection.name === dbName &&
-      /^smartorder_p23_[a-f0-9]{20}$/.test(dbName)
+      dbName === testDatabaseName()
     ) {
       await orders.deleteMany({ _id: { $in: orderIds } });
       await sessions.deleteMany({ _id: sessionId });

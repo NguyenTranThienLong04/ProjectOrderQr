@@ -7,6 +7,7 @@ import { model } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { JwtStrategy } from '../../auth/jwt.strategy';
+import { UserService } from '../../user/user.service';
 import { Category } from '../../category/category.schema';
 import { AiError } from '../ai.errors';
 import { AI_PROVIDER } from '../providers/ai-provider.interface';
@@ -25,8 +26,18 @@ describe('Phase 18 Admin draft HTTP contract (mock persistence/provider)', () =>
   const auditModel = model('DraftContractAudit', AiInteractionSchema);
   const secret = 'phase18-test-only';
   const jwt = new JwtService({ secret });
+  const authUsers = ['admin', 'kitchen', 'waiter'].map((role, index) => ({
+    id: (index + 1).toString().padStart(24, '0'),
+    email: 'test@example.invalid',
+    fullName: `Test ${role}`,
+    role,
+  }));
   const auth = (role = 'admin') =>
-    `Bearer ${jwt.sign({ sub: 'test', email: 'test@example.invalid', role })}`;
+    `Bearer ${jwt.sign({
+      sub: authUsers.find((user) => user.role === role)?.id ?? 'f'.repeat(24),
+      email: 'test@example.invalid',
+      role,
+    })}`;
   const base = { name: 'Phở bò tái', generateFields: ['nameEn'] };
   const steps: MockAiStep[] = [];
   let provider: MockAiProvider;
@@ -64,7 +75,16 @@ describe('Phase 18 Admin draft HTTP contract (mock persistence/provider)', () =>
     });
     const fixture = await Test.createTestingModule({
       imports: [ConfigModule, CatalogDraftAiModule],
-      providers: [JwtStrategy],
+      providers: [
+        JwtStrategy,
+        {
+          provide: UserService,
+          useValue: {
+            findActiveAuthUser: async (id: string) =>
+              authUsers.find((user) => user.id === id) ?? null,
+          },
+        },
+      ],
     })
       .overrideProvider(getModelToken(AiInteraction.name))
       .useValue(auditModel)
@@ -95,7 +115,8 @@ describe('Phase 18 Admin draft HTTP contract (mock persistence/provider)', () =>
         .post('/ai/admin/dish-draft')
         .set('Authorization', auth(role))
         .send(base)
-        .expect(403);
+        // Customers have no current staff account; other staff lack admin rights.
+        .expect(role === 'customer' ? 401 : 403);
     expect(provider.calls).toHaveLength(0);
     expect(insert).not.toHaveBeenCalled();
   });

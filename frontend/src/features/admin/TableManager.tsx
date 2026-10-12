@@ -1,10 +1,9 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { io } from 'socket.io-client';
+import { createStaffSocket } from '../../services/socket-client';
 import { Download, Edit2, Grid2X2, Plus, QrCode, RefreshCw, Trash2, Users } from 'lucide-react';
 import { tableApi, type Table } from '../../services/api/table';
 import { ConfirmDialog, EmptyState, Feedback, LoadingState, Modal, PageHeader, StatusBadge, controlClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-import { API_URL as socketUrl } from '../../config/api-url';
 type TableStatus = Table['status'];
 
 export function TableManager() {
@@ -13,14 +12,14 @@ export function TableManager() {
   const user = JSON.parse(localStorage.getItem('user') || '{}') as { role?: string }; const isAdmin = user.role === 'admin';
   const fetchTables = async () => { setLoading(true); try { setTables(await tableApi.findAll()); setError(null); } catch { setError('Không thể tải danh sách bàn ăn. Kiểm tra quyền truy cập và kết nối.'); } finally { setLoading(false); } };
   useEffect(() => { void fetchTables(); }, []);
-  useEffect(() => { const socket = io(socketUrl); socket.on('connect', () => { socket.emit('join', { room: 'admin' }); socket.emit('join', { room: 'waiter' }); }); socket.on('tables:updated', () => void fetchTables()); socket.on('table:grouped', () => void fetchTables()); return () => { socket.disconnect(); }; }, []);
+  useEffect(() => { const socket = createStaffSocket(); socket.on('tables:updated', () => void fetchTables()); socket.on('table:grouped', () => void fetchTables()); return () => { socket.disconnect(); }; }, []);
   const openCreate = () => { setEditingId(null); setTableCode(''); setCapacity('4'); setStatus('available'); setShowModal(true); };
   const openEdit = (table: Table) => { setEditingId(table._id); setTableCode(table.tableCode); setCapacity(String(table.capacity)); setStatus(table.status); setShowModal(true); };
   const submit = async (event: FormEvent) => { event.preventDefault(); if (!tableCode.trim()) return; setSubmitting(true); setError(null); try { const payload = { tableCode: tableCode.trim().toUpperCase(), capacity: Number.parseInt(capacity, 10) || 4, status }; if (editingId) await tableApi.update(editingId, payload); else await tableApi.create(payload); setShowModal(false); setSuccess(editingId ? 'Đã cập nhật thông tin bàn.' : 'Đã tạo bàn và mã QR.'); await fetchTables(); } catch (requestError) { setError((requestError as { response?: { data?: { message?: string } } }).response?.data?.message || 'Không thể lưu thông tin bàn.'); } finally { setSubmitting(false); } };
   const remove = async () => { if (!deleteTarget) return; setSubmitting(true); try { await tableApi.remove(deleteTarget._id); setDeleteTarget(null); setSuccess('Đã xóa bàn khỏi hệ thống.'); await fetchTables(); } catch (requestError) { setError((requestError as { response?: { data?: { message?: string } } }).response?.data?.message || 'Không thể xóa bàn.'); } finally { setSubmitting(false); } };
   const regenerateQr = async (id: string) => { setSubmitting(true); try { const updated = await tableApi.regenerateQr(id); setActiveQrTable(updated); setSuccess('Đã sinh lại mã QR thành công.'); await fetchTables(); } catch { setError('Không thể sinh lại mã QR.'); } finally { setSubmitting(false); } };
   const downloadQr = (table: Table) => { const link = document.createElement('a'); link.href = table.qrCodeUrl; link.download = `QR-Ban-${table.tableCode}.png`; document.body.appendChild(link); link.click(); link.remove(); };
-  const tableMenuUrl = activeQrTable ? `${window.location.origin}/menu?tableId=${activeQrTable._id}` : '';
+  const tableMenuUrl = activeQrTable?.menuUrl ?? 'Sinh lại QR để có liên kết được cấp quyền.';
 
   return <div className="space-y-6"><PageHeader eyebrow="Floor setup" title="Bàn ăn & QR" description="Theo dõi trạng thái thời gian thực, cấu hình sức chứa và quản lý QR gọi món." actions={isAdmin ? <button onClick={openCreate} className={primaryButtonClass}><Plus aria-hidden="true" className="h-4 w-4" />Thêm bàn</button> : undefined} />
     {error && <Feedback tone="danger">{error}</Feedback>}{success && <Feedback tone="success">{success}</Feedback>}

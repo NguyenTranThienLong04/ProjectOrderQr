@@ -1,0 +1,63 @@
+name: Build and regression tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: 'true'
+      MONGOD_BINARY: /usr/bin/mongod
+      VITE_API_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci --no-audit --no-fund
+      - name: Install MongoDB server binary
+        # https://www.mongodb.com/docs/v8.0/tutorial/install-mongodb-on-ubuntu/
+        # Jest owns the process, port and replica-set dbpath; no app DB/service is used.
+        run: |
+          curl -fsSL https://pgp.mongodb.com/server-8.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mongodb-org-server
+          mongod --version
+      - name: Backend typecheck and build
+        working-directory: backend
+        run: |
+          npm run typecheck
+          npm run build
+      - name: Frontend typecheck and build
+        working-directory: frontend
+        run: |
+          npm run typecheck
+          npm run build
+      - name: Full backend unit suite (no database)
+        working-directory: backend
+        run: npm run test:unit
+      - name: Frontend auth, recovery and order progress tests
+        working-directory: frontend
+        run: npm test
+      - name: MongoDB transaction and concurrency regressions
+        working-directory: backend
+        run: npm run test:integration
+      - name: Isolated E2E smoke and persistence tests
+        working-directory: backend
+        run: npm run test:e2e:ci

@@ -28,8 +28,8 @@ export interface TableOperationOptions {
 }
 
 export const sessionApi = {
-  getTableOperationOptions: async (): Promise<TableOperationOptions> =>
-    (await axiosClient.get<TableOperationOptions>("/sessions/table-operation-options")).data,
+  getTableOperationOptions: async (signal?: AbortSignal): Promise<TableOperationOptions> =>
+    (await axiosClient.get<TableOperationOptions>("/sessions/table-operation-options", { signal, timeout: 10_000 })).data,
   moveTable: async (
     sessionId: string,
     newTableId: string,

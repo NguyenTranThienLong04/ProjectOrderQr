@@ -27,20 +27,20 @@ export interface TablePaymentSummary {
 }
 
 export const orderApi = {
-  listForKitchen: async (): Promise<KitchenOrder[]> => {
-    const res = await axiosClient.get<KitchenOrder[]>('/orders/kitchen');
+  listForKitchen: async (signal?: AbortSignal): Promise<KitchenOrder[]> => {
+    const res = await axiosClient.get<KitchenOrder[]>('/orders/kitchen', { signal, timeout: 10_000 });
     return res.data;
   },
-  listForWaiter: async (): Promise<KitchenOrder[]> => {
-    const res = await axiosClient.get<KitchenOrder[]>('/orders/waiter');
+  listForWaiter: async (signal?: AbortSignal): Promise<KitchenOrder[]> => {
+    const res = await axiosClient.get<KitchenOrder[]>('/orders/waiter', { signal, timeout: 10_000 });
     return res.data;
   },
   transitionItem: async (orderId: string, itemId: string, status: string) => {
     const res = await axiosClient.patch(`/orders/${orderId}/items/${itemId}/status`, { status });
     return res.data;
   },
-  listPaymentSummariesForWaiter: async (): Promise<TablePaymentSummary[]> => {
-    const res = await axiosClient.get<TablePaymentSummary[]>('/orders/waiter/payment-summaries');
+  listPaymentSummariesForWaiter: async (signal?: AbortSignal): Promise<TablePaymentSummary[]> => {
+    const res = await axiosClient.get<TablePaymentSummary[]>('/orders/waiter/payment-summaries', { signal, timeout: 10_000 });
     return res.data;
   },
   downloadInvoice: async (orderId: string, sessionId: string) => {

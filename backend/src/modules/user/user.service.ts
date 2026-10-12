@@ -66,23 +66,48 @@ export class UserService {
     return this.userModel.findById(id);
   }
 
-  async findByIdWithRefreshToken(id: string): Promise<UserDocument | null> {
-    return this.userModel.findById(id).select('+refreshTokenHash');
+  async findActiveAuthUser(id: string): Promise<UserDocument | null> {
+    if (!isValidObjectId(id)) return null;
+    return this.userModel
+      .findOne({ _id: id, isActive: true })
+      .select('email role fullName isActive');
   }
 
-  async updateRefreshToken(
+  async storeRefreshToken(
     userId: string,
-    refreshToken: string | null,
-  ): Promise<void> {
-    if (refreshToken === null) {
-      await this.userModel.findByIdAndUpdate(userId, {
-        refreshTokenHash: null,
-      });
-      return;
-    }
-    const salt = await bcrypt.genSalt(10);
-    const hash = await bcrypt.hash(refreshToken, salt);
-    await this.userModel.findByIdAndUpdate(userId, { refreshTokenHash: hash });
+    role: UserRole,
+    fingerprint: string,
+  ): Promise<boolean> {
+    const result = await this.userModel.updateOne(
+      { _id: userId, isActive: true, role },
+      { $set: { refreshTokenHash: fingerprint } },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async rotateRefreshToken(
+    userId: string,
+    role: UserRole,
+    previousFingerprint: string,
+    nextFingerprint: string,
+  ): Promise<boolean> {
+    const result = await this.userModel.updateOne(
+      {
+        _id: userId,
+        isActive: true,
+        role,
+        refreshTokenHash: previousFingerprint,
+      },
+      { $set: { refreshTokenHash: nextFingerprint } },
+    );
+    return result.modifiedCount === 1;
+  }
+
+  async revokeRefreshToken(userId: string): Promise<void> {
+    await this.userModel.updateOne(
+      { _id: userId },
+      { $set: { refreshTokenHash: null } },
+    );
   }
 
   async countUsers(): Promise<number> {
@@ -136,6 +161,9 @@ export class UserService {
     if (updateUserDto.role !== undefined) user.role = updateUserDto.role;
     if (updateUserDto.isActive !== undefined)
       user.isActive = updateUserDto.isActive;
+    // Persist the revocation together with disabling, so re-enabling cannot
+    // revive a refresh token issued before the account was disabled.
+    if (updateUserDto.isActive === false) user.refreshTokenHash = null;
     if (updateUserDto.password) {
       const salt = await bcrypt.genSalt(10);
       user.passwordHash = await bcrypt.hash(updateUserDto.password, salt);

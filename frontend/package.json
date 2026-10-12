@@ -8,7 +8,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --import ./test/register-tsx.mjs --test test/auth.test.mjs test/order-progress.test.mjs test/recovery.test.mjs",
+    "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
     "axios": "^1.19.0",

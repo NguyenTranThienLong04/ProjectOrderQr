@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { Model, Types } from 'mongoose';
+import { ClientSession, Model, Types } from 'mongoose';
 import { CreatePromotionDto } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
 import { Promotion, PromotionDocument } from './promotion.schema';
@@ -124,11 +124,12 @@ export class PromotionService {
     code: string | undefined,
     subtotalAmount: number,
     now = new Date(),
+    mongoSession?: ClientSession,
   ): Promise<AppliedPromotion> {
     if (!code?.trim())
       return { subtotalAmount, discountAmount: 0, totalAmount: subtotalAmount };
     const promotion = await this.promotionModel
-      .findOne({ code: code.trim().toUpperCase() })
+      .findOne({ code: code.trim().toUpperCase() }, null, { session: mongoSession })
       .exec();
     if (!promotion) throw new NotFoundException('Mã giảm giá không tồn tại');
     this.assertEligible(promotion, subtotalAmount, now);
@@ -137,7 +138,7 @@ export class PromotionService {
       .findOneAndUpdate(
         { _id: promotion._id, $expr: { $lt: ['$usedCount', '$usageLimit'] } },
         { $inc: { usedCount: 1 } },
-        { new: true },
+        { new: true, ...(mongoSession ? { session: mongoSession } : {}) },
       )
       .exec();
     if (!reserved)

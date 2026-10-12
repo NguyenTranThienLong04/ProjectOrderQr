@@ -1,4 +1,4 @@
-import { axiosClient } from './axios-client';
+import { axiosClient, logoutAndClear } from './axios-client';
 
 export interface User {
   id: string;
@@ -19,9 +19,7 @@ export const authApi = {
     return response.data;
   },
 
-  logout: async (): Promise<void> => {
-    await axiosClient.post('/auth/logout');
-  },
+  logout: logoutAndClear,
 
   getProfile: async (): Promise<{ user: User }> => {
     const response = await axiosClient.post('/auth/me');

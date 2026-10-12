@@ -1,13 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import AnalyticsCopilot from './AnalyticsCopilot';
 import ReviewIntelligence from './ReviewIntelligence';
-import { io } from 'socket.io-client';
+import { createStaffSocket } from '../../services/socket-client';
 import { BarChart3, CalendarRange, ClipboardList, Grid2X2, RefreshCw, Star, TrendingUp, WalletCards } from 'lucide-react';
 import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { adminApi, type AnalyticsOverview, type RevenuePoint, type TopDishPoint, type TopRatedDishPoint } from '../../services/api/admin';
 import { EmptyState, Feedback, LoadingState, PageHeader, controlClass, labelClass, primaryButtonClass } from '../../components/ui';
 
-import { API_URL as socketUrl } from '../../config/api-url';
 const number = new Intl.NumberFormat('vi-VN');
 const money = new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND', maximumFractionDigits: 0 });
 
@@ -43,8 +42,7 @@ export default function AdminDashboard() {
   // oxlint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { void loadAnalytics(); }, []);
   useEffect(() => {
-    const socket = io(socketUrl);
-    socket.on('connect', () => { socket.emit('join', { room: 'admin' }); socket.emit('join', { room: 'waiter' }); });
+    const socket = createStaffSocket();
     socket.on('tables:updated', () => void loadAnalytics());
     socket.on('table:grouped', () => void loadAnalytics());
     return () => { socket.disconnect(); };

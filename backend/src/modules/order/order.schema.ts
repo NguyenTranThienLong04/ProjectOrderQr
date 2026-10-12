@@ -57,6 +57,13 @@ export const OrderItemSchema = SchemaFactory.createForClass(OrderItem);
 
 @Schema({ timestamps: true, collection: 'orders' })
 export class Order {
+  // Optional for orders created before idempotency was introduced.
+  @Prop({ maxlength: 128 })
+  idempotencyKey?: string;
+
+  @Prop({ min: 0 })
+  cartVersion?: number;
+
   @Prop({ type: Types.ObjectId, ref: 'Session', required: true })
   sessionId!: Types.ObjectId;
 
@@ -98,6 +105,14 @@ export class Order {
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
+
+OrderSchema.index(
+  { idempotencyKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { idempotencyKey: { $type: 'string' } },
+  },
+);
 
 OrderSchema.index({ tableId: 1, status: 1, createdAt: -1 });
 OrderSchema.index({ sessionId: 1, createdAt: -1 });

@@ -2,7 +2,6 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
-  BadRequestException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -17,6 +16,13 @@ import { TableStatus } from '../../common/enums/table-status.enum';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { frontendUrl } from '../../common/config/public-urls';
+import { SocketAuthService } from '../../gateway/socket-auth.service';
+import {
+  PaymentIntent,
+  PaymentIntentDocument,
+  UNRESOLVED_PAYMENT_FILTER,
+} from '../vnpay/payment-intent.schema';
+import { lifecycleTransaction } from '../session/lifecycle-transaction';
 
 @Injectable()
 export class TableService {
@@ -26,19 +32,24 @@ export class TableService {
     private readonly sessionModel: Model<SessionDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     private readonly configService: ConfigService,
+    private readonly socketAuth: SocketAuthService,
+    @InjectModel(PaymentIntent.name)
+    private readonly paymentIntentModel: Model<PaymentIntentDocument>,
   ) {}
 
   private getFrontendUrl(): string {
     return frontendUrl(this.configService.get<string>('FRONTEND_URL'));
   }
 
-  private async generateQrCodeDataUrl(tableId: string): Promise<string> {
-    const link = `${this.getFrontendUrl()}/menu?tableId=${tableId}`;
-    return QRCode.toDataURL(link, {
+  private async generateQr(tableId: string) {
+    const tableToken = await this.socketAuth.issueTableEntry(tableId);
+    const menuUrl = `${this.getFrontendUrl()}/menu?tableId=${tableId}&tableToken=${encodeURIComponent(tableToken)}`;
+    const qrCodeUrl = await QRCode.toDataURL(menuUrl, {
       errorCorrectionLevel: 'H',
       width: 300,
       margin: 2,
     });
+    return { menuUrl, qrCodeUrl };
   }
 
   async create(createTableDto: CreateTableDto): Promise<TableDocument> {
@@ -52,13 +63,13 @@ export class TableService {
     }
 
     const tableId = new Types.ObjectId();
-    const qrCodeUrl = await this.generateQrCodeDataUrl(tableId.toString());
+    const qr = await this.generateQr(tableId.toString());
 
     const newTable = new this.tableModel({
       _id: tableId,
       ...createTableDto,
       tableCode: createTableDto.tableCode.trim().toUpperCase(),
-      qrCodeUrl,
+      ...qr,
     });
 
     return newTable.save();
@@ -112,67 +123,131 @@ export class TableService {
 
   async regenerateQr(id: string): Promise<TableDocument> {
     const table = await this.findOne(id);
-    const qrCodeUrl = await this.generateQrCodeDataUrl(table.id);
-    table.qrCodeUrl = qrCodeUrl;
+    const qr = await this.generateQr(table.id);
+    table.qrCodeUrl = qr.qrCodeUrl;
+    table.menuUrl = qr.menuUrl;
     return table.save();
   }
 
   async clear(id: string): Promise<TableDocument> {
-    const table = await this.findOne(id);
-    if (!table.currentSessionId) {
-      throw new BadRequestException(
-        'Bàn không có phiên ăn đang hoạt động để dọn',
-      );
-    }
-    const session = await this.sessionModel
-      .findById(table.currentSessionId)
-      .exec();
-    if (!session || session.status !== SessionStatus.ACTIVE) {
-      throw new BadRequestException('Phiên ăn của bàn không còn hoạt động');
-    }
-    if (session.cart.length > 0) {
-      throw new BadRequestException(
-        'Không thể dọn bàn khi phiên ăn vẫn còn món trong giỏ hàng',
-      );
-    }
-    const outstandingOrder = await this.orderModel
-      .exists({
-        sessionId: session._id,
-        status: { $nin: [OrderStatus.PAID, OrderStatus.CANCELLED] },
-      })
-      .exec();
-    if (outstandingOrder) {
-      throw new BadRequestException(
-        'Không thể dọn bàn khi phiên ăn vẫn còn đơn chưa thanh toán',
-      );
-    }
-    await this.sessionModel
-      .updateOne(
-        { _id: session._id, status: SessionStatus.ACTIVE },
-        { $set: { status: SessionStatus.CLOSED, endedAt: new Date() } },
+    return lifecycleTransaction(this.tableModel.db, async (mongoSession) => {
+      const table = await this.tableModel
+        .findById(id)
+        .session(mongoSession)
+        .exec();
+      if (!table) throw new NotFoundException('Không tìm thấy bàn');
+      if (!table.currentSessionId) {
+        throw new ConflictException(
+          'Bàn không có phiên ăn đang hoạt động để dọn',
+        );
+      }
+      const session = await this.sessionModel
+        .findById(table.currentSessionId)
+        .session(mongoSession)
+        .exec();
+      if (!session || session.status !== SessionStatus.ACTIVE) {
+        throw new ConflictException('Phiên ăn của bàn không còn hoạt động');
+      }
+      if (session.cart.length > 0) {
+        throw new ConflictException(
+          'Không thể dọn bàn khi phiên ăn vẫn còn món trong giỏ hàng',
+        );
+      }
+      const outstandingOrder = await this.orderModel
+        .exists({
+          sessionId: session._id,
+          status: { $nin: [OrderStatus.PAID, OrderStatus.CANCELLED] },
+        })
+        .session(mongoSession)
+        .exec();
+      if (outstandingOrder) {
+        throw new ConflictException(
+          'Không thể dọn bàn khi phiên ăn vẫn còn đơn chưa thanh toán',
+        );
+      }
+      const orders = await this.orderModel
+        .find({ sessionId: session._id })
+        .select('_id')
+        .session(mongoSession)
+        .exec();
+      const unresolved = await this.paymentIntentModel
+        .exists({
+          $and: [
+            UNRESOLVED_PAYMENT_FILTER,
+            {
+              $or: [
+                { sessionId: session._id },
+                { coveredOrderIds: { $in: orders.map((order) => order._id) } },
+              ],
+            },
+          ],
+        })
+        .session(mongoSession)
+        .exec();
+      if (unresolved)
+        throw new ConflictException(
+          'Checkout chưa được xác nhận, không thể đóng phiên',
+        );
+      const sessionTableIds = session.tableIds?.length
+        ? session.tableIds
+        : [session.tableId];
+      const owned = await this.tableModel
+        .find({ currentSessionId: session._id })
+        .session(mongoSession)
+        .exec();
+      if (
+        owned.length !== sessionTableIds.length ||
+        !sessionTableIds.some((tableId) => tableId.equals(session.tableId)) ||
+        !sessionTableIds.some((tableId) => tableId.equals(table._id)) ||
+        owned.some(
+          (member) =>
+            !sessionTableIds.some((tableId) => tableId.equals(member._id)),
+        )
       )
-      .exec();
-    // A merged session can own multiple physical tables. Clearing its bill must
-    // release every table linked to that same session, never leave siblings stuck.
-    const sessionTableIds = session.tableIds?.length
-      ? session.tableIds
-      : [table._id];
-    await this.tableModel
-      .updateMany(
-        { _id: { $in: sessionTableIds }, currentSessionId: session._id },
-        {
-          $set: {
-            status: TableStatus.AVAILABLE,
-            currentSessionId: null,
-            groupedWithTableIds: [],
-            groupRootTableId: null,
-            groupedAt: null,
+        throw new ConflictException('Liên kết phiên và bàn không còn khớp');
+      const closed = await this.sessionModel
+        .updateOne(
+          {
+            _id: session._id,
+            status: SessionStatus.ACTIVE,
+            version: session.version,
+            cart: { $size: 0 },
           },
-        },
-      )
-      .exec();
-    const updated = await this.tableModel.findById(id).exec();
-    if (!updated) throw new NotFoundException('Không tìm thấy bàn');
-    return updated;
+          {
+            $set: { status: SessionStatus.CLOSED, endedAt: new Date() },
+            $inc: { version: 1 },
+          },
+          { session: mongoSession },
+        )
+        .exec();
+      if (closed.modifiedCount !== 1)
+        throw new ConflictException('Phiên vừa thay đổi');
+      // A merged session can own multiple physical tables. Clearing its bill must
+      // release every table linked to that same session, never leave siblings stuck.
+      const released = await this.tableModel
+        .updateMany(
+          { _id: { $in: sessionTableIds }, currentSessionId: session._id },
+          {
+            $set: {
+              status: TableStatus.AVAILABLE,
+              currentSessionId: null,
+              groupedWithTableIds: [],
+              groupRootTableId: null,
+              groupedAt: null,
+            },
+            $inc: { __v: 1 },
+          },
+          { session: mongoSession },
+        )
+        .exec();
+      if (released.modifiedCount !== sessionTableIds.length)
+        throw new ConflictException('Bàn vừa thay đổi');
+      const updated = await this.tableModel
+        .findById(id)
+        .session(mongoSession)
+        .exec();
+      if (!updated) throw new NotFoundException('Không tìm thấy bàn');
+      return updated;
+    });
   }
 }

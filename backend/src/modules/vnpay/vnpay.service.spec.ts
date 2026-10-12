@@ -75,6 +75,11 @@ describe('VnpayService Session payment', () => {
       vnp_TxnRef: intent.txnRef,
       vnp_Amount: String(intent.amount * 100),
       vnp_ResponseCode: '00',
+      vnp_TmnCode: 'TESTCODE',
+      vnp_TransactionStatus:
+        overrides.vnp_ResponseCode && overrides.vnp_ResponseCode !== '00'
+          ? '02'
+          : '00',
       vnp_TransactionNo: '123456',
       ...overrides,
     };
@@ -103,6 +108,9 @@ describe('VnpayService Session payment', () => {
       currentSessionId: sessionId,
     };
     orderModel = {
+      updateMany: jest.fn((filter) =>
+        query({ modifiedCount: filter._id.$in.length }),
+      ),
       find: jest.fn((filter: Record<string, any>) => {
         let result = orders.filter(
           (order) => order.sessionId.toString() === filter.sessionId.toString(),
@@ -170,6 +178,20 @@ describe('VnpayService Session payment', () => {
         )
           return false;
         if (filter.status && intent.status !== filter.status) return false;
+        if (
+          filter.paymentMethod &&
+          intent.paymentMethod !== filter.paymentMethod
+        )
+          return false;
+        if (
+          filter.$or &&
+          !(
+            intent.status === PaymentIntentStatus.PENDING ||
+            (intent.status === PaymentIntentStatus.FAILED &&
+              !intent.ipnConfirmed)
+          )
+        )
+          return false;
         return true;
       });
       return query(found ?? null);
@@ -199,7 +221,11 @@ describe('VnpayService Session payment', () => {
         const found = intents.find(
           (intent) =>
             intent._id.toString() === filter._id.toString() &&
-            intent.status === filter.status,
+            (filter.status
+              ? intent.status === filter.status
+              : intent.status === PaymentIntentStatus.PENDING ||
+                (intent.status === PaymentIntentStatus.FAILED &&
+                  !intent.ipnConfirmed)),
         );
         if (found) Object.assign(found, update.$set, { updatedAt: new Date() });
         return query(found ?? null);

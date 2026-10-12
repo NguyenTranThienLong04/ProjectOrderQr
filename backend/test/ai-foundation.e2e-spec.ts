@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { ConfigService } from '@nestjs/config';
 import {
   getConnectionToken,
@@ -22,13 +21,11 @@ import {
   validAiEnv,
 } from '../src/modules/ai/testing/ai-test.fixture';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 
 /** Real Mongo, unique test DB override. Never boots business workers/seeds. */
 describe('Phase 17 AI module + real audit persistence', () => {
-  const dbName = `smartorder_p17_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const ids: Types.ObjectId[] = [];
   let fixture: TestingModule;
   let interactions: Model<AiInteraction>;
@@ -40,12 +37,6 @@ describe('Phase 17 AI module + real audit persistence', () => {
     { output: { value: 'bad' } },
   ]);
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production')
-      throw new Error('AI integration test is forbidden in production');
-    if (!process.env.MONGODB_URI)
-      throw new Error(
-        'MONGODB_URI is required; DB name is always overridden for this test',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(
@@ -53,7 +44,7 @@ describe('Phase 17 AI module + real audit persistence', () => {
       );
     fixture = await Test.createTestingModule({
       imports: [
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,

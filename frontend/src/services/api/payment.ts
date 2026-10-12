@@ -56,10 +56,13 @@ export const paymentApi = {
   getSessionSummary: async (
     sessionId: string,
     tableId: string,
+    signal?: AbortSignal,
   ): Promise<SessionPaymentSummary> =>
     (
       await axiosClient.get<SessionPaymentSummary>('/vnpay/session-summary', {
         params: { sessionId, tableId },
+        skipAuthRefresh: true,
+        signal, timeout: 10_000,
       })
     ).data,
 
@@ -83,10 +86,13 @@ export const paymentApi = {
     txnRef: string,
     sessionId: string,
     tableId: string,
+    signal?: AbortSignal,
   ): Promise<PaymentStatus> =>
     (
       await axiosClient.get<PaymentStatus>('/vnpay/payment-status', {
         params: { txnRef, sessionId, tableId },
+        skipAuthRefresh: true,
+        signal, timeout: 5_000,
       })
     ).data,
 

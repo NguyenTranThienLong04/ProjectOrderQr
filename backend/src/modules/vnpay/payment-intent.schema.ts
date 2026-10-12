@@ -8,6 +8,18 @@ export enum PaymentIntentStatus {
   FAILED = 'failed',
 }
 
+// Older versions also wrote FAILED on local expiry/browser return. Those
+// records remain unresolved until a verified server callback confirms them.
+export const UNRESOLVED_PAYMENT_FILTER = {
+  $or: [
+    { status: PaymentIntentStatus.PENDING },
+    {
+      status: PaymentIntentStatus.FAILED,
+      ipnConfirmed: { $in: [false, null] },
+    },
+  ],
+};
+
 export type PaymentIntentDocument = HydratedDocument<PaymentIntent>;
 
 @Schema({ timestamps: true, collection: 'payment_intents' })
@@ -35,8 +47,14 @@ export class PaymentIntent {
   coveredOrderIds!: Types.ObjectId[];
 
   /** VND amount snapshotted from SUM(covered Order.totalAmount). */
-  @Prop({ required: true, min: 1 })
+  @Prop({ required: true, min: 0 })
   amount!: number;
+
+  @Prop({ type: String, enum: ['vnpay', 'internal_zero'], default: 'vnpay' })
+  paymentMethod!: 'vnpay' | 'internal_zero';
+
+  @Prop({ default: false })
+  ipnConfirmed!: boolean;
 
   /** Reused while this intent is pending, so concurrent clicks cannot charge twice. */
   @Prop({ required: true, trim: true })
@@ -84,6 +102,23 @@ PaymentIntentSchema.index(
 PaymentIntentSchema.index({ txnRef: 1 }, { unique: true });
 PaymentIntentSchema.index({ sessionId: 1, createdAt: -1 });
 PaymentIntentSchema.index({ status: 1, expiresAt: 1 });
+PaymentIntentSchema.index(
+  { sessionId: 1 },
+  {
+    unique: true,
+    name: 'one_unresolved_checkout_per_session',
+    partialFilterExpression: UNRESOLVED_PAYMENT_FILTER,
+  },
+);
+// Session ownership can change on merge; the same Order must remain reserved.
+PaymentIntentSchema.index(
+  { coveredOrderIds: 1 },
+  {
+    unique: true,
+    name: 'one_unresolved_checkout_per_order',
+    partialFilterExpression: UNRESOLVED_PAYMENT_FILTER,
+  },
+);
 PaymentIntentSchema.index(
   { coverageKey: 1 },
   {

@@ -2,5 +2,8 @@
   "rootDir": "../..",
   "testEnvironment": "node",
   "testMatch": ["<rootDir>/scripts/ai-evaluation/*.spec.ts"],
-  "transform": { "^.+\\.ts$": "ts-jest" }
+  "transform": {
+    "^.+\\.ts$": "ts-jest"
+  },
+  "setupFilesAfterEnv": ["<rootDir>/test/support/unit-setup.cjs"]
 }

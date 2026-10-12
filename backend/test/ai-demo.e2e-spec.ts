@@ -1,5 +1,4 @@
-import 'dotenv/config';
-import { setServers } from 'node:dns';
+import { testMongoUri, testDatabaseName } from './support/test-database';
 import { createConnection, Types } from 'mongoose';
 import type { Connection, Model } from 'mongoose';
 import { buildDataset, fingerprint } from '../scripts/ai-demo/dataset';
@@ -65,18 +64,8 @@ describe('Phase 16 seed/reset + real MongoDB menu/analytics regression', () => {
     );
 
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production')
-      throw new Error('Forbidden in production');
-    const base = process.env.AI_DEMO_TEST_MONGODB_URI;
-    if (!base)
-      throw new Error(
-        'Explicit AI_DEMO_TEST_MONGODB_URI is required (host used only with unique demo DB override).',
-      );
-    const dbName = `smartorder_ai_demo_test_${Date.now().toString(36)}`;
-    const uri = base.replace(
-      /^(mongodb(?:\+srv)?:\/\/[^/]+)\/[^?]*(\?.*)?$/,
-      `$1/${dbName}$2`,
-    );
+    const dbName = testDatabaseName();
+    const uri = testMongoUri();
     env = {
       NODE_ENV: 'test',
       AI_DEMO_ALLOW_WRITE: 'I_UNDERSTAND_SYNTHETIC_DATA',
@@ -84,8 +73,6 @@ describe('Phase 16 seed/reset + real MongoDB menu/analytics regression', () => {
       AI_DEMO_DB_NAME: dbName,
       AI_DEMO_MONGODB_URI: uri,
     };
-    if (process.env.CUSTOM_DNS_SERVERS)
-      setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
     connection = await createConnection(uri, {
       dbName,
       serverSelectionTimeoutMS: 15000,

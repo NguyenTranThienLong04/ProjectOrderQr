@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -33,8 +32,6 @@ import { buildCatalog } from '../scripts/ai-demo/catalog';
 import { ReviewIntelligenceService } from '../src/modules/ai/review-intelligence/review-intelligence.service';
 import { AiError } from '../src/modules/ai/ai.errors';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 const reportBody = (response: { body: unknown }) =>
   response.body as Awaited<ReturnType<ReviewIntelligenceService['summary']>>;
@@ -42,7 +39,7 @@ const sourcesBody = (response: { body: unknown }) =>
   response.body as { total: number; reviews: { _id: string }[] };
 
 describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider', () => {
-  const dbName = `smartorder_p22_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const secret = 'phase22-test-only',
     jwt = new JwtService({ secret });
   const auth = (role = 'admin') =>
@@ -73,17 +70,13 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
       .set('Authorization', auth())
       .send(body);
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production MONGODB_URI; isolated dbName only',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
     const fixture = await Test.createTestingModule({
       imports: [
         ConfigModule,
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,

@@ -1,5 +1,3 @@
-import 'dotenv/config';
-import * as dns from 'dns';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
@@ -25,12 +23,8 @@ import {
   PaymentIntentStatus,
 } from '../src/modules/vnpay/payment-intent.schema';
 
-if (process.env.CUSTOM_DNS_SERVERS) {
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
-}
-
-// Isolate this suite from ordinary dev Sessions in the shared Atlas database.
-// Fixtures marked 2010 are stale; normal documents cannot reach this 10-year cutoff.
+// Preserve the fixture cutoff; the shared harness supplies a private database
+// and disables scheduled cleanup so only explicit cleanup calls run here.
 const originalTimeout = process.env.EMPTY_SESSION_TIMEOUT_MINUTES;
 process.env.EMPTY_SESSION_TIMEOUT_MINUTES = '5256000';
 jest.setTimeout(60_000);

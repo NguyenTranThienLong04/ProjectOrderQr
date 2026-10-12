@@ -2,6 +2,10 @@
   "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": ".",
   "testEnvironment": "node",
+  "globalSetup": "<rootDir>/support/mongo-global-setup.cjs",
+  "globalTeardown": "<rootDir>/support/mongo-global-teardown.cjs",
+  "setupFilesAfterEnv": ["<rootDir>/support/mongo-setup.cjs"],
+  "maxWorkers": 2,
   "testRegex": ".e2e-spec.ts$",
   "transform": {
     "^.+\\.(t|j)s$": "ts-jest"

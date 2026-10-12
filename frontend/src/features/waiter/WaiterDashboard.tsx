@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { io } from 'socket.io-client';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { createStaffSocket } from '../../services/socket-client';
+import { useSnapshotRefresh } from '../../hooks/use-snapshot-refresh';
+import { bindSnapshotRecovery } from '../../services/snapshot-refresh';
 import {
   ArrowRightLeft,
   BellRing,
@@ -17,7 +19,6 @@ import { sessionApi, type TableOperationOptions } from '../../services/api/sessi
 import { tableApi, type Table } from '../../services/api/table';
 import { EmptyState, Feedback, PageHeader, StatusBadge, controlClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-import { API_URL as socketUrl } from '../../config/api-url';
 interface WaiterCall { tableId: string; timestamp: string; }
 const getErrorMessage = (error: unknown) => (error as { response?: { data?: { message?: string } } }).response?.data?.message ?? (error instanceof Error ? error.message : 'Vui lòng thử lại.');
 
@@ -39,33 +40,22 @@ export default function WaiterDashboard() {
   const [clearingTableId, setClearingTableId] = useState<string | null>(null);
   const [waiterCalls, setWaiterCalls] = useState<WaiterCall[]>([]);
   const [loading, setLoading] = useState(true);
-  const loadPromiseRef = useRef<Promise<void> | null>(null);
-
-  const load = useCallback(() => {
-    if (loadPromiseRef.current) return loadPromiseRef.current;
-    const request = Promise.all([orderApi.listForWaiter(), tableApi.findAll(), orderApi.listPaymentSummariesForWaiter(), sessionApi.getTableOperationOptions()])
-      .then(([readyOrders, allTables, summaries, operationOptions]) => {
-        setOrders(readyOrders); setTables(allTables); setPaymentSummaries(summaries); setTableOperations(operationOptions); setError(null);
-      })
-      .catch((loadError: unknown) => { setError(`Không thể tải dữ liệu phục vụ: ${getErrorMessage(loadError)}`); })
-      .finally(() => {
-        setLoading(false);
-        if (loadPromiseRef.current === request) loadPromiseRef.current = null;
-      });
-    loadPromiseRef.current = request;
-    return request;
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
+  const load = useSnapshotRefresh(
+    (signal) => Promise.all([orderApi.listForWaiter(signal), tableApi.findAll(signal), orderApi.listPaymentSummariesForWaiter(signal), sessionApi.getTableOperationOptions(signal)]),
+    ([readyOrders, allTables, summaries, operationOptions]) => {
+      setOrders(readyOrders); setTables(allTables); setPaymentSummaries(summaries); setTableOperations(operationOptions); setError(null); setLoading(false);
+    },
+    (loadError) => { setError(`Không thể tải dữ liệu phục vụ: ${getErrorMessage(loadError)}`); setLoading(false); },
+  );
   useEffect(() => {
-    const socket = io(socketUrl);
-    socket.on('connect', () => socket.emit('join', { room: 'waiter' }));
+    const socket = createStaffSocket();
+    const unbind = bindSnapshotRecovery(socket, load);
     socket.on('order:updated', () => void load());
     socket.on('order:paid', () => void load());
     socket.on('tables:updated', () => void load());
     socket.on('table:grouped', () => void load());
     socket.on('waiter:called', (call: WaiterCall) => { if (call?.tableId && call.timestamp) setWaiterCalls((calls) => calls.some((item) => item.tableId === call.tableId) ? calls : [call, ...calls]); });
-    return () => { socket.removeAllListeners(); socket.disconnect(); };
+    return () => { unbind(); socket.removeAllListeners(); socket.disconnect(); };
   }, [load]);
 
   const activeTables = useMemo(() => tables.filter((table) => table.currentSessionId), [tables]);

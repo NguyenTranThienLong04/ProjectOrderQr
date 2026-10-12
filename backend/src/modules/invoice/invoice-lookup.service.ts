@@ -62,16 +62,19 @@ export class InvoiceLookupService implements OnModuleInit {
     const orders = await this.orders
       .find({
         _id: { $in: intent.coveredOrderIds },
-        sessionId: intent.sessionId,
       })
       .sort({ createdAt: 1, _id: 1 })
       .exec();
     if (orders.length !== intent.coveredOrderIds.length)
       throw new NotFoundException('Không tìm thấy đầy đủ đơn của hóa đơn');
-    const session = await this.sessions.findById(intent.sessionId).exec();
-    const tableIds = session?.tableIds?.length
-      ? session.tableIds
-      : [intent.tableId];
+    // Receipt coverage and the original physical Order tables survive moves and
+    // historical session merges. Current Session membership is not invoice data.
+    const tableIds = [
+      ...new Set([
+        intent.tableId.toString(),
+        ...orders.map((order) => order.tableId.toString()),
+      ]),
+    ];
     const tables = await this.tables.find({ _id: { $in: tableIds } }).exec();
     const rounds = orders.map((order, index) => ({
       sequence: index + 1,
@@ -152,8 +155,6 @@ export class InvoiceLookupService implements OnModuleInit {
   ): Promise<{ pdf: Buffer; filename: string }> {
     const order = await this.orders.findById(orderId).exec();
     if (!order) throw new NotFoundException('Không tìm thấy đơn hàng');
-    if (order.sessionId.toString() !== sessionId)
-      throw new ForbiddenException('Bạn không có quyền truy cập hóa đơn này');
     if (order.status !== OrderStatus.PAID)
       throw new ForbiddenException(
         'Chỉ có thể tải hóa đơn sau khi đơn đã thanh toán',
@@ -161,10 +162,11 @@ export class InvoiceLookupService implements OnModuleInit {
     const intent = await this.intents
       .findOne({
         coveredOrderIds: new Types.ObjectId(orderId),
-        sessionId: order.sessionId,
         status: PaymentIntentStatus.SUCCEEDED,
       })
       .exec();
+    if ((intent?.sessionId ?? order.sessionId).toString() !== sessionId)
+      throw new ForbiddenException('Bạn không có quyền truy cập hóa đơn này');
     if (intent) return this.file(await this.detail(intent));
     // Pre-Session-payment Orders have no PaymentIntent to identify. Keep their
     // historical PDF accessible without inventing a payment or exposing an ID.

@@ -5,6 +5,7 @@ export interface Table {
   tableCode: string;
   status: 'available' | 'occupied' | 'waiting_payment' | 'hidden';
   qrCodeUrl: string;
+  menuUrl?: string;
   currentSessionId?: string | null;
   groupedWithTableIds?: string[];
   capacity: number;
@@ -13,8 +14,8 @@ export interface Table {
 }
 
 export const tableApi = {
-  findAll: async (): Promise<Table[]> => {
-    const response = await axiosClient.get<Table[]>('/tables');
+  findAll: async (signal?: AbortSignal): Promise<Table[]> => {
+    const response = await axiosClient.get<Table[]>('/tables', { signal, timeout: 10_000 });
     return response.data;
   },
 

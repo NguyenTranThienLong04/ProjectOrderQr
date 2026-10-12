@@ -2,11 +2,12 @@ import { readOrderNoteReceipt } from '../../common/order-note-receipt';
 import type { OrderNoteAnalysis } from '../../common/schemas/order-note-analysis.schema';
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, Model, Types } from 'mongoose';
+import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { TableStatus } from '../../common/enums/table-status.enum';
 import { Dish, DishDocument } from '../dish/dish.schema';
 import { Table, TableDocument } from '../table/table.schema';
@@ -14,6 +15,11 @@ import { SessionStatus } from '../../common/enums/session-status.enum';
 import { Session, SessionDocument } from './session.schema';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  PaymentIntent,
+  PaymentIntentDocument,
+} from '../vnpay/payment-intent.schema';
+import { lifecycleTransaction } from './lifecycle-transaction';
 
 export const MAX_CART_ITEM_NOTE_LENGTH = 250;
 
@@ -56,6 +62,8 @@ export class SessionService {
     @InjectModel(Dish.name) private readonly dishModel: Model<DishDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectConnection() private readonly connection: Connection,
+    @InjectModel(PaymentIntent.name)
+    private readonly paymentIntentModel: Model<PaymentIntentDocument>,
   ) {}
 
   private toCartResponse(session: SessionDocument) {
@@ -303,95 +311,101 @@ export class SessionService {
     return { moveSources, moveDestinations, mergeCandidates, unmergeGroups };
   }
 
-  /**
-   * Table.currentSessionId is the single pointer used while opening a session.
-   * A contender only wins with an atomic compare-and-set; temporary losing
-   * sessions are immediately closed, so simultaneous QR scans share one cart.
-   */
+  /** Claim the whole group or nothing, including races with move/merge/clear. */
   async getOrCreateActiveSession(tableId: string) {
-    const table = await this.tableModel.findById(tableId).exec();
-    if (!table) throw new NotFoundException('Không tìm thấy bàn');
-    if (table.currentSessionId) {
-      const current = await this.sessionModel
-        .findOneAndUpdate(
-          { _id: table.currentSessionId, status: SessionStatus.ACTIVE },
-          { $set: { lastActivityAt: new Date() } },
-          { new: true },
-        )
-        .exec();
-      if (current) return this.toResumableSessionResponse(current);
-    }
-    // waiting_payment describes an active dining session; it is not a terminal
-    // table state. Only reject inconsistent data where no active session can be
-    // restored, rather than creating a duplicate session behind the stale state.
-    if (table.status === TableStatus.WAITING_PAYMENT) {
-      throw new BadRequestException(
-        'Bàn đang chờ thanh toán nhưng phiên ăn không còn hoạt động',
-      );
-    }
+    const session = await lifecycleTransaction(
+      this.connection,
+      async (mongoSession) => {
+        const table = await this.tableModel
+          .findById(tableId)
+          .session(mongoSession)
+          .exec();
+        if (!table) throw new NotFoundException('Không tìm thấy bàn');
+        if (table.currentSessionId) {
+          const current = await this.sessionModel
+            .findOneAndUpdate(
+              {
+                _id: table.currentSessionId,
+                status: SessionStatus.ACTIVE,
+                $or: [{ tableIds: table._id }, { tableId: table._id }],
+              },
+              { $set: { lastActivityAt: new Date() } },
+              { returnDocument: 'after', session: mongoSession },
+            )
+            .exec();
+          if (current) return current;
+          throw new ConflictException(
+            'Bàn đang trỏ tới phiên không còn hoạt động',
+          );
+        }
+        // waiting_payment describes an active dining session; it is not a terminal
+        // table state. Only reject inconsistent data where no active session can be
+        // restored, rather than creating a duplicate session behind the stale state.
+        if (table.status === TableStatus.WAITING_PAYMENT) {
+          throw new BadRequestException(
+            'Bàn đang chờ thanh toán nhưng phiên ăn không còn hoạt động',
+          );
+        }
+        if (table.status !== TableStatus.AVAILABLE)
+          throw new ConflictException('Bàn không khả dụng');
 
-    const groupedIds = [
-      ...new Set([
-        table.id,
-        ...(table.groupedWithTableIds ?? []).map((id) => id.toString()),
-      ]),
-    ].map((id) => new Types.ObjectId(id));
-    const candidate = await new this.sessionModel({
-      tableId: table._id,
-      tableIds: groupedIds,
-    }).save();
-    const claimedTable = await this.tableModel
-      .findOneAndUpdate(
-        { _id: { $in: groupedIds }, currentSessionId: null },
-        {
-          $set: {
-            currentSessionId: candidate._id,
-            status: TableStatus.OCCUPIED,
-            groupedWithTableIds: [],
-            groupRootTableId: null,
-            groupedAt: null,
-          },
-        },
-        { new: true },
-      )
-      .exec();
-    if (claimedTable) {
-      // Claim every grouped table; a competing QR scan can only win one session pointer.
-      await this.tableModel
-        .updateMany(
-          { _id: { $in: groupedIds }, currentSessionId: null },
-          {
-            $set: {
-              currentSessionId: candidate._id,
-              status: TableStatus.OCCUPIED,
-              groupedWithTableIds: [],
-              groupRootTableId: null,
-              groupedAt: null,
+        const groupedIds = [
+          ...new Set([
+            table.id,
+            ...(table.groupedWithTableIds ?? []).map((id) => id.toString()),
+          ]),
+        ].map((id) => new Types.ObjectId(id));
+        const members = await this.tableModel
+          .find({ _id: { $in: groupedIds } })
+          .session(mongoSession)
+          .exec();
+        if (
+          members.length !== groupedIds.length ||
+          members.some(
+            (member) =>
+              member.currentSessionId ||
+              member.status !== TableStatus.AVAILABLE ||
+              member.groupedWithTableIds.length !== groupedIds.length - 1 ||
+              !groupedIds.every(
+                (id) =>
+                  id.equals(member._id) ||
+                  member.groupedWithTableIds.some((other) => other.equals(id)),
+              ),
+          )
+        )
+          throw new ConflictException(
+            'Nhóm bàn vừa thay đổi, vui lòng tải lại',
+          );
+        const candidate = await new this.sessionModel({
+          tableId: table._id,
+          tableIds: groupedIds,
+        }).save({ session: mongoSession });
+        const claimedTable = await this.tableModel
+          .updateMany(
+            {
+              _id: { $in: groupedIds },
+              currentSessionId: null,
+              status: TableStatus.AVAILABLE,
             },
-          },
-        )
-        .exec();
-      return this.toResumableSessionResponse(candidate);
-    }
-
-    await this.sessionModel
-      .findByIdAndUpdate(candidate._id, {
-        status: SessionStatus.CLOSED,
-        endedAt: new Date(),
-      })
-      .exec();
-    const resolvedTable = await this.tableModel.findById(table._id).exec();
-    const winner = resolvedTable?.currentSessionId
-      ? await this.sessionModel
-          .findOne({
-            _id: resolvedTable.currentSessionId,
-            status: SessionStatus.ACTIVE,
-          })
-          .exec()
-      : null;
-    if (!winner)
-      throw new BadRequestException('Không thể mở phiên ăn, vui lòng thử lại');
-    return this.toResumableSessionResponse(winner);
+            {
+              $set: {
+                currentSessionId: candidate._id,
+                status: TableStatus.OCCUPIED,
+                groupedWithTableIds: [],
+                groupRootTableId: null,
+                groupedAt: null,
+              },
+              $inc: { __v: 1 },
+            },
+            { session: mongoSession },
+          )
+          .exec();
+        if (claimedTable.modifiedCount !== groupedIds.length)
+          throw new ConflictException('Không thể nhận toàn bộ nhóm bàn');
+        return candidate;
+      },
+    );
+    return this.toResumableSessionResponse(session);
   }
 
   /** Backend-owned preview subtotal using the current active cart and live Dish prices. */
@@ -508,6 +522,7 @@ export class SessionService {
     note?: string,
     analysisToken?: unknown,
     confirmedByCustomer?: unknown,
+    authorizedTableId?: string,
   ) {
     if (
       !Types.ObjectId.isValid(dishId) ||
@@ -536,6 +551,9 @@ export class SessionService {
         {
           _id: sessionId,
           status: SessionStatus.ACTIVE,
+          ...(authorizedTableId
+            ? { tableIds: new Types.ObjectId(authorizedTableId) }
+            : {}),
           cart: { $elemMatch: itemIdentity },
         },
         {
@@ -556,6 +574,9 @@ export class SessionService {
           {
             _id: sessionId,
             status: SessionStatus.ACTIVE,
+            ...(authorizedTableId
+              ? { tableIds: new Types.ObjectId(authorizedTableId) }
+              : {}),
             cart: { $not: { $elemMatch: itemIdentity } },
           },
           {
@@ -583,6 +604,9 @@ export class SessionService {
           {
             _id: sessionId,
             status: SessionStatus.ACTIVE,
+            ...(authorizedTableId
+              ? { tableIds: new Types.ObjectId(authorizedTableId) }
+              : {}),
             cart: { $elemMatch: itemIdentity },
           },
           {
@@ -607,6 +631,7 @@ export class SessionService {
     dishId: string,
     quantity: number,
     cartItemId?: string,
+    authorizedTableId?: string,
   ) {
     if (
       !Types.ObjectId.isValid(dishId) ||
@@ -630,6 +655,9 @@ export class SessionService {
         {
           _id: sessionId,
           status: SessionStatus.ACTIVE,
+          ...(authorizedTableId
+            ? { tableIds: new Types.ObjectId(authorizedTableId) }
+            : {}),
           cart: { $elemMatch: itemIdentity },
         },
         {
@@ -649,7 +677,12 @@ export class SessionService {
     return this.toCartResponse(session);
   }
 
-  async removeFromCart(sessionId: string, dishId: string, cartItemId?: string) {
+  async removeFromCart(
+    sessionId: string,
+    dishId: string,
+    cartItemId?: string,
+    authorizedTableId?: string,
+  ) {
     if (!Types.ObjectId.isValid(dishId))
       throw new BadRequestException('Mã món không hợp lệ');
     if (cartItemId && !Types.ObjectId.isValid(cartItemId)) {
@@ -666,6 +699,9 @@ export class SessionService {
         {
           _id: sessionId,
           status: SessionStatus.ACTIVE,
+          ...(authorizedTableId
+            ? { tableIds: new Types.ObjectId(authorizedTableId) }
+            : {}),
           cart: { $elemMatch: itemIdentity },
         },
         {
@@ -683,10 +719,17 @@ export class SessionService {
     return this.toCartResponse(session);
   }
 
-  async consumeCartForOrder(tableId: string) {
+  async consumeCartForOrder(
+    tableId: string,
+    sessionId: string,
+    cartVersion: number,
+    mongoSession: ClientSession,
+  ) {
     const session = await this.sessionModel
       .findOneAndUpdate(
         {
+          _id: new Types.ObjectId(sessionId),
+          version: cartVersion,
           tableIds: new Types.ObjectId(tableId),
           status: SessionStatus.ACTIVE,
           'cart.0': { $exists: true },
@@ -695,20 +738,19 @@ export class SessionService {
           $set: { cart: [], lastActivityAt: new Date() },
           $inc: { version: 1 },
         },
-        { new: false },
+        { new: false, session: mongoSession },
       )
       .exec();
     if (!session)
       throw new BadRequestException(
-        'Giỏ hàng đang trống hoặc phiên ăn không còn hoạt động',
+        'Giỏ hàng đã thay đổi, đang trống hoặc phiên ăn không còn hoạt động. Vui lòng tải lại giỏ hàng',
       );
     return session;
   }
 
   /** Move an active single-table session to a different table.
-   * Validates the destination table is AVAILABLE (no currentSessionId) and not WAITING_PAYMENT.
-   * Updates the old table to AVAILABLE and the new table to OCCUPIED with currentSessionId.
-   * Keeps session.cart/orders/statusHistory unchanged, only updates session.tableId.
+   * Atomically releases the source and claims an ungrouped AVAILABLE table,
+   * preserving OCCUPIED/WAITING_PAYMENT and the original financial references.
    */
   async moveSessionToTable(sessionId: string, newTableId: string) {
     if (
@@ -717,58 +759,143 @@ export class SessionService {
     ) {
       throw new BadRequestException('Mã không hợp lệ');
     }
-    const session = await this.sessionModel
-      .findOne({ _id: sessionId, status: SessionStatus.ACTIVE })
-      .exec();
-    if (!session)
-      throw new NotFoundException(
-        'Phiên ăn không tồn tại hoặc không còn hoạt động',
-      );
-    if ((session.tableIds?.length ?? 1) > 1)
-      throw new BadRequestException(
-        'Phiên đang ghép nhiều bàn; hãy tách bàn trước khi chuyển',
-      );
+    return lifecycleTransaction(this.connection, async (mongoSession) => {
+      const session = await this.sessionModel
+        .findOne({ _id: sessionId, status: SessionStatus.ACTIVE })
+        .session(mongoSession)
+        .exec();
+      if (!session)
+        throw new ConflictException(
+          'Phiên ăn không tồn tại hoặc không còn hoạt động',
+        );
+      if ((session.tableIds?.length ?? 1) > 1)
+        throw new BadRequestException(
+          'Phiên đang ghép nhiều bàn; hãy tách bàn trước khi chuyển',
+        );
 
-    const newTable = await this.tableModel.findById(newTableId).exec();
-    if (!newTable) throw new NotFoundException('Bàn đích không tồn tại');
+      const newTable = await this.tableModel
+        .findById(newTableId)
+        .session(mongoSession)
+        .exec();
+      if (!newTable) throw new NotFoundException('Bàn đích không tồn tại');
+      if (
+        newTable.status !== TableStatus.AVAILABLE ||
+        newTable.currentSessionId ||
+        newTable.groupedWithTableIds?.length ||
+        newTable.groupRootTableId
+      ) {
+        throw new ConflictException('Bàn đích không khả dụng');
+      }
+      await this.assertTableOwnership(session, mongoSession);
+      const released = await this.tableModel
+        .findOneAndUpdate(
+          { _id: session.tableId, currentSessionId: session._id },
+          {
+            $set: { currentSessionId: null, status: TableStatus.AVAILABLE },
+            $inc: { __v: 1 },
+          },
+          { returnDocument: 'before', session: mongoSession },
+        )
+        .exec();
+      if (!released) throw new ConflictException('Bàn nguồn vừa thay đổi');
+
+      // Claim new table atomically if still available
+      const claimed = await this.tableModel
+        .findOneAndUpdate(
+          {
+            _id: newTable._id,
+            currentSessionId: null,
+            status: TableStatus.AVAILABLE,
+            groupedWithTableIds: { $size: 0 },
+          },
+          {
+            $set: { currentSessionId: session._id, status: released.status },
+            $inc: { __v: 1 },
+          },
+          { returnDocument: 'after', session: mongoSession },
+        )
+        .exec();
+      if (!claimed)
+        throw new ConflictException(
+          'Không thể đổi sang bàn đích, vui lòng thử lại',
+        );
+
+      const moved = await this.sessionModel
+        .updateOne(
+          {
+            _id: session._id,
+            status: SessionStatus.ACTIVE,
+            version: session.version,
+          },
+          {
+            $set: { tableId: claimed._id, tableIds: [claimed._id] },
+            $inc: { version: 1 },
+          },
+          { session: mongoSession },
+        )
+        .exec();
+      if (moved.modifiedCount !== 1)
+        throw new ConflictException('Phiên vừa thay đổi');
+
+      return { sessionId: session._id.toString() };
+    });
+  }
+
+  private async assertTableOwnership(
+    session: SessionDocument,
+    mongoSession: ClientSession,
+  ) {
+    const ids = session.tableIds?.length ? session.tableIds : [session.tableId];
+    const tables = await this.tableModel
+      .find({ currentSessionId: session._id })
+      .session(mongoSession)
+      .exec();
     if (
-      newTable.status !== TableStatus.AVAILABLE ||
-      newTable.currentSessionId
-    ) {
-      throw new BadRequestException('Bàn đích không khả dụng');
-    }
-
-    // Free old table (if still pointing to this session)
-    await this.tableModel
-      .findOneAndUpdate(
-        { _id: session.tableId, currentSessionId: session._id },
-        { $set: { currentSessionId: null, status: TableStatus.AVAILABLE } },
+      tables.length !== ids.length ||
+      !ids.some((id) => id.equals(session.tableId)) ||
+      tables.some(
+        (table) =>
+          !ids.some((id) => id.equals(table._id)) ||
+          ![TableStatus.OCCUPIED, TableStatus.WAITING_PAYMENT].includes(
+            table.status,
+          ),
       )
-      .exec();
+    )
+      throw new ConflictException('Liên kết phiên và bàn không còn khớp');
+  }
 
-    // Claim new table atomically if still available
-    const claimed = await this.tableModel
-      .findOneAndUpdate(
-        { _id: newTable._id, currentSessionId: null },
-        {
-          $set: { currentSessionId: session._id, status: TableStatus.OCCUPIED },
-        },
-        { new: true },
-      )
+  private async assertNoPaymentHistory(
+    sessionIds: Types.ObjectId[],
+    mongoSession: ClientSession,
+  ) {
+    const orders = await this.orderModel
+      .find({ sessionId: { $in: sessionIds } })
+      .session(mongoSession)
       .exec();
-    if (!claimed)
-      throw new BadRequestException(
-        'Không thể đổi sang bàn đích, vui lòng thử lại',
-      );
-
-    // Update session's tableId only
-    await this.sessionModel
-      .findByIdAndUpdate(session._id, {
-        $set: { tableId: claimed._id, tableIds: [claimed._id] },
+    // Shares the Order write fence used by checkout and payment confirmation.
+    // Checking PaymentIntent alone would leave a snapshot-isolation race.
+    if (orders.length)
+      await this.orderModel
+        .updateMany(
+          { _id: { $in: orders.map((order) => order._id) } },
+          { $inc: { __v: 1 } },
+          { session: mongoSession },
+        )
+        .exec();
+    const history = await this.paymentIntentModel
+      .exists({
+        $or: [
+          { sessionId: { $in: sessionIds } },
+          { coveredOrderIds: { $in: orders.map((order) => order._id) } },
+        ],
       })
+      .session(mongoSession)
       .exec();
-
-    return { sessionId: session._id.toString() };
+    if (history || orders.some((order) => order.status === OrderStatus.PAID))
+      throw new ConflictException(
+        'Không thể ghép/tách phiên đã có lịch sử checkout hoặc thanh toán',
+      );
+    return orders;
   }
 
   /** @deprecated Use mergeTables so the server, not the UI, chooses the business case. */
@@ -798,11 +925,16 @@ export class SessionService {
     return this.mergeTables(
       source.tableId.toString(),
       target.tableId.toString(),
+      { source: sourceSessionId, target: targetSessionId },
     );
   }
 
   /** One authoritative merge flow. A transaction prevents duplicate merge/lost cart updates. */
-  async mergeTables(sourceTableId: string, targetTableId: string) {
+  async mergeTables(
+    sourceTableId: string,
+    targetTableId: string,
+    expectedSessions?: { source: string; target: string },
+  ) {
     if (
       !Types.ObjectId.isValid(sourceTableId) ||
       !Types.ObjectId.isValid(targetTableId)
@@ -810,52 +942,14 @@ export class SessionService {
       throw new BadRequestException('Mã bàn không hợp lệ');
     if (sourceTableId === targetTableId)
       throw new BadRequestException('Không thể ghép một bàn với chính nó');
-    const lockToken = new Types.ObjectId().toHexString();
-    const lockExpiresAt = new Date(Date.now() + 30_000);
-    const tableIds = [
-      new Types.ObjectId(sourceTableId),
-      new Types.ObjectId(targetTableId),
-    ];
-    // Claim both tables before opening the transaction. updateMany can claim only a
-    // subset, so release that subset and return a clear conflict instead of allowing
-    // two concurrent merges to both use the shared table.
-    const lock = await this.tableModel
-      .updateMany(
-        {
-          _id: { $in: tableIds },
-          $or: [
-            { mergeLockToken: null },
-            { mergeLockToken: { $exists: false } },
-            { mergeLockExpiresAt: { $lte: new Date() } },
-          ],
-        },
-        {
-          $set: {
-            mergeLockToken: lockToken,
-            mergeLockExpiresAt: lockExpiresAt,
-          },
-        },
-      )
-      .exec();
-    if (lock.modifiedCount !== tableIds.length) {
-      await this.tableModel
-        .updateMany(
-          { mergeLockToken: lockToken },
-          { $set: { mergeLockToken: null, mergeLockExpiresAt: null } },
-        )
-        .exec();
-      throw new BadRequestException(
-        'Một trong các bàn đang được ghép bởi thao tác khác, vui lòng thử lại',
-      );
-    }
-    const mongoSession = await this.connection.startSession();
     let result: {
       case: 'grouped' | 'joined' | 'merged';
       rootSessionId?: string;
       sourceSessionId?: string;
     };
-    try {
-      await mongoSession.withTransaction(async () => {
+    await lifecycleTransaction(
+      this.connection,
+      async (mongoSession: ClientSession) => {
         // The MongoDB driver forbids parallel operations on a ClientSession
         // while it has an active transaction.
         const sourceTable = await this.tableModel
@@ -868,14 +962,6 @@ export class SessionService {
           .exec();
         if (!sourceTable || !targetTable)
           throw new NotFoundException('Không tìm thấy một trong hai bàn');
-        if (
-          sourceTable.mergeLockToken !== lockToken ||
-          targetTable.mergeLockToken !== lockToken
-        ) {
-          throw new BadRequestException(
-            'Thao tác ghép bàn đã hết hiệu lực, vui lòng thử lại',
-          );
-        }
         if (
           sourceTable.status === TableStatus.WAITING_PAYMENT ||
           targetTable.status === TableStatus.WAITING_PAYMENT
@@ -901,6 +987,14 @@ export class SessionService {
               .session(mongoSession)
               .exec()
           : null;
+        if (
+          expectedSessions &&
+          (source?.id !== expectedSessions.source ||
+            target?.id !== expectedSessions.target)
+        )
+          throw new ConflictException(
+            'Phiên đã chuyển bàn hoặc đóng, vui lòng tải lại',
+          );
         if (
           (sourceTable.currentSessionId && !source) ||
           (targetTable.currentSessionId && !target)
@@ -943,9 +1037,16 @@ export class SessionService {
             'Bàn chính là member của nhóm ghép; hãy chọn đúng nhóm thay vì bàn độc lập',
           );
         }
+        for (const active of [source, target]) {
+          if (active) await this.assertTableOwnership(active, mongoSession);
+        }
+        const orders = await this.assertNoPaymentHistory(
+          [source?._id, target?._id].filter((id): id is Types.ObjectId => !!id),
+          mongoSession,
+        );
         if (!source && !target) {
           const groupedAt = new Date();
-          await this.tableModel
+          const groupedSource = await this.tableModel
             .updateOne(
               { _id: sourceTable._id, currentSessionId: null },
               {
@@ -954,11 +1055,12 @@ export class SessionService {
                   groupRootTableId: targetTable._id,
                   groupedAt,
                 },
+                $inc: { __v: 1 },
               },
               { session: mongoSession },
             )
             .exec();
-          await this.tableModel
+          const groupedTarget = await this.tableModel
             .updateOne(
               { _id: targetTable._id, currentSessionId: null },
               {
@@ -967,10 +1069,16 @@ export class SessionService {
                   groupRootTableId: targetTable._id,
                   groupedAt,
                 },
+                $inc: { __v: 1 },
               },
               { session: mongoSession },
             )
             .exec();
+          if (
+            groupedSource.modifiedCount !== 1 ||
+            groupedTarget.modifiedCount !== 1
+          )
+            throw new ConflictException('Bàn vừa thay đổi');
           result = { case: 'grouped' };
           return;
         }
@@ -998,12 +1106,22 @@ export class SessionService {
             )
             .exec();
           if (joined.modifiedCount !== 1)
-            throw new BadRequestException(
+            throw new ConflictException(
               'Phiên đang thay đổi, vui lòng thử lại',
             );
-          await this.tableModel
+          const joinedTables = await this.tableModel
             .updateMany(
-              { _id: { $in: ids } },
+              {
+                _id: { $in: ids },
+                $or: [
+                  { currentSessionId: active._id },
+                  {
+                    _id: addedTable._id,
+                    currentSessionId: null,
+                    status: TableStatus.AVAILABLE,
+                  },
+                ],
+              },
               {
                 $set: {
                   currentSessionId: active._id,
@@ -1012,10 +1130,13 @@ export class SessionService {
                   groupRootTableId: null,
                   groupedAt: null,
                 },
+                $inc: { __v: 1 },
               },
               { session: mongoSession },
             )
             .exec();
+          if (joinedTables.modifiedCount !== ids.length)
+            throw new ConflictException('Bàn vừa thay đổi');
           result = { case: 'joined', rootSessionId: active.id };
           return;
         }
@@ -1067,6 +1188,13 @@ export class SessionService {
           ),
         ].map((id) => new Types.ObjectId(id));
         const at = new Date();
+        const descendants = await this.sessionModel
+          .find({
+            mergedIntoSessionId: source._id,
+            status: SessionStatus.MERGED,
+          })
+          .session(mongoSession)
+          .exec();
         const mergedTarget = await this.sessionModel
           .updateOne(
             {
@@ -1086,7 +1214,7 @@ export class SessionService {
           )
           .exec();
         if (mergedTarget.modifiedCount !== 1)
-          throw new BadRequestException(
+          throw new ConflictException(
             'Phiên đích vừa thay đổi, vui lòng thử lại',
           );
         const mark = await this.sessionModel
@@ -1104,6 +1232,12 @@ export class SessionService {
                 preMergeCart: source.cart,
                 postMergeRootCart: [...mergedMap.values()],
                 preMergeTableIds: sourceTables,
+                preMergeOrderIds: orders
+                  .filter((order) => order.sessionId.equals(source._id))
+                  .map((order) => order._id),
+                preMergeDescendantSessionIds: descendants.map(
+                  (child) => child._id,
+                ),
               },
               $inc: { version: 1 },
             },
@@ -1111,36 +1245,38 @@ export class SessionService {
           )
           .exec();
         if (mark.modifiedCount !== 1)
-          throw new BadRequestException(
+          throw new ConflictException(
             'Phiên nguồn vừa thay đổi, vui lòng thử lại',
           );
-        await this.sessionModel
+        // Preserve the existing direct-to-active-root lookup convention.
+        const reparented = await this.sessionModel
           .updateMany(
-            { mergedIntoSessionId: source._id },
-            { $set: { mergedIntoSessionId: target._id } },
+            {
+              _id: { $in: descendants.map((child) => child._id) },
+              mergedIntoSessionId: source._id,
+              status: SessionStatus.MERGED,
+            },
+            { $set: { mergedIntoSessionId: target._id }, $inc: { version: 1 } },
             { session: mongoSession },
           )
           .exec();
+        if (reparented.modifiedCount !== descendants.length)
+          throw new ConflictException('Liên kết nhóm con vừa thay đổi');
         await this.orderModel
           .updateMany(
             { sessionId: source._id },
             {
               $set: { sessionId: target._id },
-              $push: {
-                statusHistory: {
-                  status: 'MERGED',
-                  note: `Reassigned to session ${target.id}`,
-                  actorType: 'SYSTEM',
-                  at,
-                },
-              },
             },
             { session: mongoSession },
           )
           .exec();
-        await this.tableModel
+        const mergedTables = await this.tableModel
           .updateMany(
-            { _id: { $in: allTableIds } },
+            {
+              _id: { $in: allTableIds },
+              currentSessionId: { $in: [source._id, target._id] },
+            },
             {
               $set: {
                 currentSessionId: target._id,
@@ -1149,26 +1285,21 @@ export class SessionService {
                 groupRootTableId: null,
                 groupedAt: null,
               },
+              $inc: { __v: 1 },
             },
             { session: mongoSession },
           )
           .exec();
+        if (mergedTables.modifiedCount !== allTableIds.length)
+          throw new ConflictException('Bàn vừa thay đổi');
         result = {
           case: 'merged',
           rootSessionId: target.id,
           sourceSessionId: source.id,
         };
-      });
-      return result!;
-    } finally {
-      await mongoSession.endSession();
-      await this.tableModel
-        .updateMany(
-          { mergeLockToken: lockToken },
-          { $set: { mergeLockToken: null, mergeLockExpiresAt: null } },
-        )
-        .exec();
-    }
+      },
+    );
+    return result!;
   }
 
   async unmergeSession(childSessionId?: string, tableId?: string) {
@@ -1178,13 +1309,13 @@ export class SessionService {
       throw new BadRequestException('Mã phiên không hợp lệ');
     if (tableId && !Types.ObjectId.isValid(tableId))
       throw new BadRequestException('Mã bàn không hợp lệ');
-    const mongoSession = await this.connection.startSession();
     let restoredChildSessionId = childSessionId;
     let rootSessionId: string | undefined;
     let restoredTableIds: string[] = [];
     let ungroupedTableIds: string[] | undefined;
-    try {
-      await mongoSession.withTransaction(async () => {
+    await lifecycleTransaction(
+      this.connection,
+      async (mongoSession: ClientSession) => {
         if (tableId) {
           const selectedTable = await this.tableModel
             .findById(tableId)
@@ -1243,12 +1374,13 @@ export class SessionService {
                     groupRootTableId: null,
                     groupedAt: null,
                   },
+                  $inc: { __v: 1 },
                 },
                 { session: mongoSession },
               )
               .exec();
             if (ungrouped.modifiedCount !== groupIds.length) {
-              throw new BadRequestException(
+              throw new ConflictException(
                 'Nhóm bàn vừa thay đổi; vui lòng tải lại và thử lại',
               );
             }
@@ -1309,6 +1441,8 @@ export class SessionService {
           );
         }
         rootSessionId = root.id;
+        await this.assertTableOwnership(root, mongoSession);
+        await this.assertNoPaymentHistory([root._id, child._id], mongoSession);
         restoredTableIds = child.preMergeTableIds.map((id) => id.toString());
         const laterOrder = await this.orderModel
           .exists({ sessionId: root._id, createdAt: { $gt: child.mergedAt } })
@@ -1320,6 +1454,11 @@ export class SessionService {
         if (!child.postMergeRootCart) {
           throw new BadRequestException(
             'Không thể tách tự động vì audit cũ chưa có snapshot giỏ hàng chung; cần xử lý thủ công',
+          );
+        }
+        if (!child.preMergeOrderIds || !child.preMergeDescendantSessionIds) {
+          throw new ConflictException(
+            'Audit cũ chưa có snapshot đơn hàng/phiên con; không thể tách tự động',
           );
         }
         if (!this.cartSnapshotsEqual(root.cart, child.postMergeRootCart)) {
@@ -1361,9 +1500,21 @@ export class SessionService {
               childTableId.equals(id),
             ),
         );
-        await this.sessionModel
+        if (
+          !rootTableIds.length ||
+          !rootTableIds.some((id) => id.equals(root.tableId)) ||
+          !child.preMergeTableIds.every((id) =>
+            root.tableIds.some((owned) => owned.equals(id)),
+          )
+        )
+          throw new ConflictException('Liên kết bàn của nhóm đã thay đổi');
+        const restoredRoot = await this.sessionModel
           .updateOne(
-            { _id: root._id, version: root.version },
+            {
+              _id: root._id,
+              status: SessionStatus.ACTIVE,
+              version: root.version,
+            },
             {
               $set: { cart: rootCart, tableIds: rootTableIds },
               $pull: { mergedFromSessionIds: child._id },
@@ -1372,9 +1523,14 @@ export class SessionService {
             { session: mongoSession },
           )
           .exec();
-        await this.sessionModel
+        const restoredChild = await this.sessionModel
           .updateOne(
-            { _id: child._id, status: SessionStatus.MERGED },
+            {
+              _id: child._id,
+              status: SessionStatus.MERGED,
+              version: child.version,
+              mergedIntoSessionId: root._id,
+            },
             {
               $set: {
                 status: SessionStatus.ACTIVE,
@@ -1389,48 +1545,72 @@ export class SessionService {
             { session: mongoSession },
           )
           .exec();
-        // Orders retain their original tableId, so this restores precisely the orders that
-        // came from the child before the merge without touching root-table orders.
-        await this.orderModel
+        if (
+          restoredRoot.modifiedCount !== 1 ||
+          restoredChild.modifiedCount !== 1
+        )
+          throw new ConflictException('Phiên vừa thay đổi');
+        const restoredDescendants = await this.sessionModel
+          .updateMany(
+            {
+              _id: { $in: child.preMergeDescendantSessionIds },
+              mergedIntoSessionId: root._id,
+              status: SessionStatus.MERGED,
+            },
+            { $set: { mergedIntoSessionId: child._id }, $inc: { version: 1 } },
+            { session: mongoSession },
+          )
+          .exec();
+        if (
+          restoredDescendants.modifiedCount !==
+          child.preMergeDescendantSessionIds.length
+        )
+          throw new ConflictException('Liên kết nhóm con vừa thay đổi');
+        const restoredOrders = await this.orderModel
           .updateMany(
             {
               sessionId: root._id,
-              tableId: { $in: child.preMergeTableIds },
-              createdAt: { $lte: child.mergedAt },
+              _id: { $in: child.preMergeOrderIds },
             },
             { $set: { sessionId: child._id } },
             { session: mongoSession },
           )
           .exec();
-        await this.tableModel
+        if (restoredOrders.modifiedCount !== child.preMergeOrderIds.length)
+          throw new ConflictException('Liên kết đơn hàng đã thay đổi');
+        const restoredTables = await this.tableModel
           .updateMany(
-            { _id: { $in: child.preMergeTableIds } },
+            {
+              _id: { $in: child.preMergeTableIds },
+              currentSessionId: root._id,
+            },
             {
               $set: {
                 currentSessionId: child._id,
                 status: TableStatus.OCCUPIED,
               },
+              $inc: { __v: 1 },
             },
             { session: mongoSession },
           )
           .exec();
-      });
-      if (ungroupedTableIds) {
-        return {
-          case: 'ungrouped' as const,
-          tableIds: ungroupedTableIds,
-          status: TableStatus.AVAILABLE,
-        };
-      }
+        if (restoredTables.modifiedCount !== child.preMergeTableIds.length)
+          throw new ConflictException('Bàn vừa thay đổi');
+      },
+    );
+    if (ungroupedTableIds) {
       return {
-        case: 'session' as const,
-        childSessionId: restoredChildSessionId!,
-        rootSessionId: rootSessionId!,
-        tableIds: restoredTableIds,
-        status: SessionStatus.ACTIVE,
+        case: 'ungrouped' as const,
+        tableIds: ungroupedTableIds,
+        status: TableStatus.AVAILABLE,
       };
-    } finally {
-      await mongoSession.endSession();
     }
+    return {
+      case: 'session' as const,
+      childSessionId: restoredChildSessionId!,
+      rootSessionId: rootSessionId!,
+      tableIds: restoredTableIds,
+      status: SessionStatus.ACTIVE,
+    };
   }
 }

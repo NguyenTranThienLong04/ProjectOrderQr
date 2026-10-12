@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, Module, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -34,8 +33,6 @@ import { Order } from '../src/modules/order/order.schema';
 import type { OrderNoteAnalysis } from '../src/common/schemas/order-note-analysis.schema';
 import { issueOrderNoteReceipt } from '../src/common/order-note-receipt';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 @Module({})
 class IsolatedOrderNoteDatabaseModule {}
@@ -61,7 +58,7 @@ type ResponseBody = {
 };
 const body = (response: { body: unknown }) => response.body as ResponseBody;
 describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', () => {
-  const dbName = `smartorder_p19_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const tableId = new Types.ObjectId();
   const otherTableId = new Types.ObjectId();
   const sessionId = new Types.ObjectId();
@@ -108,10 +105,6 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       socket.on('cart:synced', listener);
     });
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production Mongo; isolated dbName always overrides URI',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
@@ -120,7 +113,7 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       .useModule({
         module: IsolatedOrderNoteDatabaseModule,
         imports: [
-          MongooseModule.forRoot(process.env.MONGODB_URI, {
+          MongooseModule.forRoot(testMongoUri(), {
             dbName,
             retryAttempts: 0,
             serverSelectionTimeoutMS: 15000,

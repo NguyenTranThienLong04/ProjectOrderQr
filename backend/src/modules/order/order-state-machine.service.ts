@@ -1,17 +1,24 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
-import { ClientSession, Model, Types } from 'mongoose';
+import { ClientSession, Model, Types, UpdateQuery } from 'mongoose';
 import { ActorType } from '../../common/enums/actor-type.enum';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { Order, OrderDocument } from './order.schema';
 import { Table, TableDocument } from '../table/table.schema';
 import { TableStatus } from '../../common/enums/table-status.enum';
+import {
+  canTransitionOrder,
+  ITEM_TRANSITIONS,
+  orderSourcesFor,
+  PROCESSING_ORDER_STATUSES,
+} from './order-transition.rules';
 
 @Injectable()
 export class OrderStateMachineService {
@@ -26,62 +33,50 @@ export class OrderStateMachineService {
     next: OrderStatus,
     actor: { id: string; role: UserRole },
   ) {
-    const order = await this.orderModel.findById(orderId).exec();
-    if (!order) throw new NotFoundException('Không tìm thấy đơn');
-    const item = order.items.find(
-      (entry) => entry._id.toString() === itemId.toString(),
-    );
-    if (!item) throw new NotFoundException('Không tìm thấy món trong đơn');
-    const allowed =
-      (actor.role === UserRole.KITCHEN &&
-        ((item.status === OrderStatus.PENDING &&
-          next === OrderStatus.PREPARING) ||
-          (item.status === OrderStatus.PREPARING &&
-            next === OrderStatus.READY))) ||
-      (actor.role === UserRole.WAITER &&
-        item.status === OrderStatus.READY &&
-        next === OrderStatus.SERVED) ||
-      actor.role === UserRole.ADMIN;
-    if (!allowed)
-      throw new ForbiddenException(
-        'Role hoặc thứ tự chuyển trạng thái không hợp lệ',
+    const order = await this.updateState(orderId, (current) => {
+      if (!PROCESSING_ORDER_STATUSES.includes(current.status))
+        throw new ForbiddenException('Đơn không còn cho phép xử lý món');
+      const index = current.items.findIndex(
+        (entry) => entry._id.toString() === itemId.toString(),
       );
-    if (actor.role === UserRole.ADMIN && next === OrderStatus.CANCELLED) {
-      /* admin override */
-    } else if (item.status === next)
-      throw new BadRequestException('Món đã ở trạng thái này');
-    const from = item.status;
-    item.status = next;
-    item.statusHistory.push({
-      fromStatus: from,
-      toStatus: next,
-      changedBy: {
-        actorType: ActorType.USER,
-        userId: new Types.ObjectId(actor.id),
-        role: actor.role,
-      },
-      changedAt: new Date(),
-    });
-    // An order is Served only when every item has been served. This keeps the
-    // payment gate aligned with the item-level kitchen/waiter workflow.
-    if (
-      next === OrderStatus.SERVED &&
-      order.status === OrderStatus.PENDING &&
-      order.items.every((orderItem) => orderItem.status === OrderStatus.SERVED)
-    ) {
-      order.status = OrderStatus.SERVED;
-      order.statusHistory.push({
-        fromStatus: OrderStatus.PENDING,
-        toStatus: OrderStatus.SERVED,
+      if (index < 0)
+        throw new NotFoundException('Không tìm thấy món trong đơn');
+      const item = current.items[index];
+      const edge = ITEM_TRANSITIONS[item.status];
+      if (!edge || edge.to !== next || !edge.roles.includes(actor.role))
+        throw new ForbiddenException(
+          'Role hoặc thứ tự chuyển trạng thái không hợp lệ',
+        );
+      const history = {
+        fromStatus: item.status,
+        toStatus: next,
         changedBy: {
           actorType: ActorType.USER,
           userId: new Types.ObjectId(actor.id),
           role: actor.role,
         },
         changedAt: new Date(),
-      });
-    }
-    await order.save();
+      };
+      const update: UpdateQuery<OrderDocument> = {
+        $set: { [`items.${index}.status`]: next },
+        $push: { [`items.${index}.statusHistory`]: history },
+      };
+      // Compute from the version that will actually be committed. A competing
+      // item transition makes the CAS fail and this calculation runs again.
+      if (
+        next === OrderStatus.SERVED &&
+        current.items.every(
+          (entry, i) => i === index || entry.status === OrderStatus.SERVED,
+        )
+      ) {
+        update.$set!.status = OrderStatus.SERVED;
+        update.$push!.statusHistory = {
+          ...history,
+          fromStatus: current.status,
+        };
+      }
+      return update;
+    });
     if (order.status === OrderStatus.SERVED) {
       const hasUnservedActiveOrder = await this.orderModel.exists({
         sessionId: order.sessionId,
@@ -122,9 +117,16 @@ export class OrderStateMachineService {
     // can win Served → Paid and append the payment audit entry.
     const order = await this.orderModel
       .findOneAndUpdate(
-        { _id: orderId, status: OrderStatus.SERVED },
+        {
+          _id: orderId,
+          status: { $in: orderSourcesFor(next) },
+          items: {
+            $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+          },
+        },
         {
           $set: { status: OrderStatus.PAID, paidAt: changedAt },
+          $inc: { __v: 1 },
           $push: {
             statusHistory: {
               fromStatus: OrderStatus.SERVED,
@@ -157,7 +159,7 @@ export class OrderStateMachineService {
     orderIds: Types.ObjectId[],
     sessionId: Types.ObjectId,
     metadata: {
-      triggeredBy: 'vnpay_webhook';
+      triggeredBy: 'vnpay_webhook' | 'internal_zero';
       transactionNo?: string;
       amount: number;
     },
@@ -177,10 +179,25 @@ export class OrderStateMachineService {
       throw new BadRequestException(
         'Snapshot giao dịch không khớp các đơn của phiên ăn',
       );
+    const total = coveredOrders.reduce(
+      (sum, order) => sum + order.totalAmount,
+      0,
+    );
     if (
       coveredOrders.some(
         (order) =>
-          order.status !== OrderStatus.SERVED ||
+          !Number.isSafeInteger(order.totalAmount) || order.totalAmount < 0,
+      ) ||
+      !Number.isSafeInteger(total) ||
+      total !== metadata.amount ||
+      (metadata.triggeredBy === 'internal_zero' && total !== 0)
+    ) {
+      throw new BadRequestException('Số tiền không khớp snapshot thanh toán');
+    }
+    if (
+      coveredOrders.some(
+        (order) =>
+          !canTransitionOrder(order.status, OrderStatus.PAID) ||
           order.items.some((item) => item.status !== OrderStatus.SERVED),
       )
     ) {
@@ -195,10 +212,14 @@ export class OrderStateMachineService {
         {
           _id: { $in: uniqueOrderIds },
           sessionId,
-          status: OrderStatus.SERVED,
+          status: { $in: orderSourcesFor(OrderStatus.PAID) },
+          items: {
+            $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+          },
         },
         {
           $set: { status: OrderStatus.PAID, paidAt: changedAt },
+          $inc: { __v: 1 },
           $push: {
             statusHistory: {
               fromStatus: OrderStatus.SERVED,
@@ -227,51 +248,96 @@ export class OrderStateMachineService {
   }
 
   async cancelCustomer(orderId: string, sessionId: string) {
-    const order = await this.orderModel
-      .findOne({ _id: orderId, sessionId })
-      .exec();
-    if (!order)
-      throw new NotFoundException('Không tìm thấy đơn thuộc phiên ăn này');
-    // Only allow customer cancel when the order-level status is Pending AND all items are still Pending.
-    if (order.status !== OrderStatus.PENDING)
-      throw new ForbiddenException('Chỉ hủy được đơn Pending');
-    const anyStarted = order.items.some(
-      (it) => it.status !== OrderStatus.PENDING,
+    if (!sessionId || !Types.ObjectId.isValid(sessionId))
+      throw new BadRequestException('Phiên ăn không hợp lệ');
+    return this.updateState(
+      orderId,
+      (order) => {
+        this.assertOrderTransition(order.status, OrderStatus.CANCELLED);
+        if (order.status !== OrderStatus.PENDING)
+          throw new ForbiddenException('Chỉ hủy được đơn Pending');
+        if (order.items.some((it) => it.status !== OrderStatus.PENDING))
+          throw new ForbiddenException(
+            'Không thể hủy: món đã được bắt đầu xử lý',
+          );
+        return {
+          $set: { status: OrderStatus.CANCELLED },
+          $push: {
+            statusHistory: {
+              fromStatus: order.status,
+              toStatus: OrderStatus.CANCELLED,
+              changedBy: {
+                actorType: ActorType.CUSTOMER,
+                sessionId: new Types.ObjectId(sessionId),
+              },
+              changedAt: new Date(),
+            },
+          },
+        };
+      },
+      sessionId,
     );
-    if (anyStarted)
-      throw new ForbiddenException('Không thể hủy: món đã được bắt đầu xử lý');
-    order.status = OrderStatus.CANCELLED;
-    order.statusHistory.push({
-      fromStatus: OrderStatus.PENDING,
-      toStatus: OrderStatus.CANCELLED,
-      changedBy: {
-        actorType: ActorType.CUSTOMER,
-        sessionId: new Types.ObjectId(sessionId),
-      },
-      changedAt: new Date(),
-    });
-    await order.save();
-    return order;
   }
-  /** Admin override: cancel any order at any status (for support/incident handling). */
+
+  /** Admin may cancel a nonterminal order, but cannot undo payment. */
   async cancelByAdmin(orderId: string, admin: { id: string; role: UserRole }) {
-    const order = await this.orderModel.findById(orderId).exec();
-    if (!order) throw new NotFoundException('Không tìm thấy đơn');
-    if (order.status === OrderStatus.CANCELLED)
-      throw new BadRequestException('Đơn đã bị hủy trước đó');
-    const from = order.status;
-    order.status = OrderStatus.CANCELLED;
-    order.statusHistory.push({
-      fromStatus: from,
-      toStatus: OrderStatus.CANCELLED,
-      changedBy: {
-        actorType: ActorType.USER,
-        userId: new Types.ObjectId(admin.id),
-        role: admin.role,
-      },
-      changedAt: new Date(),
+    if (admin.role !== UserRole.ADMIN)
+      throw new ForbiddenException('Chỉ admin được hủy đơn tại đây');
+    return this.updateState(orderId, (order) => {
+      this.assertOrderTransition(order.status, OrderStatus.CANCELLED);
+      return {
+        $set: { status: OrderStatus.CANCELLED },
+        $push: {
+          statusHistory: {
+            fromStatus: order.status,
+            toStatus: OrderStatus.CANCELLED,
+            changedBy: {
+              actorType: ActorType.USER,
+              userId: new Types.ObjectId(admin.id),
+              role: admin.role,
+            },
+            changedAt: new Date(),
+          },
+        },
+      };
     });
-    await order.save();
-    return order;
+  }
+
+  private assertOrderTransition(from: OrderStatus, to: OrderStatus) {
+    if (!canTransitionOrder(from, to))
+      throw new ForbiddenException('Thứ tự chuyển trạng thái đơn không hợp lệ');
+  }
+
+  private async updateState(
+    orderId: string,
+    buildUpdate: (order: OrderDocument) => UpdateQuery<OrderDocument>,
+    sessionId?: string,
+  ): Promise<OrderDocument> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const order = await this.orderModel
+        .findOne({
+          _id: orderId,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+        })
+        .exec();
+      if (!order) throw new NotFoundException('Không tìm thấy đơn');
+      const update = buildUpdate(order);
+      const updated = await this.orderModel
+        .findOneAndUpdate(
+          {
+            _id: order._id,
+            sessionId: order.sessionId,
+            status: order.status,
+            __v: order.__v ?? { $exists: false },
+          },
+          { ...update, $inc: { __v: 1 } },
+          { returnDocument: 'after', runValidators: true },
+        )
+        .exec();
+      if (updated) return updated;
+      // Retry only a competing write. Validation and database errors propagate;
+      // failed comparisons never write either state or history.
+    }
+    throw new ConflictException('Đơn vừa thay đổi, vui lòng thử lại');
   }
 }

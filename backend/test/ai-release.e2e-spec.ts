@@ -1,6 +1,4 @@
-import 'dotenv/config';
-import * as dns from 'node:dns';
-import { randomUUID } from 'node:crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -43,8 +41,6 @@ import { RecommendationService } from '../src/modules/menu/recommendation.servic
 import { MenuService } from '../src/modules/menu/menu.service';
 import { searchCases } from '../scripts/ai-evaluation/dataset.v1';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 @Module({})
 class ReleaseDatabase {}
@@ -136,7 +132,7 @@ const envelope = (output: unknown) =>
   });
 
 describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated provider and signed test IPN', () => {
-  const dbName = `smartorder_p24_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const tableId = new Types.ObjectId(),
     sessionId = new Types.ObjectId(),
     categoryId = new Types.ObjectId();
@@ -294,10 +290,6 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
     });
 
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires development/test Mongo; isolated dbName override mandatory',
-      );
     fetchMock = jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('External network forbidden'));
@@ -312,7 +304,7 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
       .useModule({
         module: ReleaseDatabase,
         imports: [
-          MongooseModule.forRoot(process.env.MONGODB_URI, {
+          MongooseModule.forRoot(testMongoUri(), {
             dbName,
             retryAttempts: 0,
             serverSelectionTimeoutMS: 15000,

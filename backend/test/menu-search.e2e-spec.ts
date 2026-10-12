@@ -1,6 +1,5 @@
-import 'dotenv/config';
-import * as dns from 'dns';
-import { randomUUID } from 'crypto';
+import { testMongoUri, testDatabaseName } from './support/test-database';
+
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import {
@@ -29,8 +28,6 @@ import { Table } from '../src/modules/table/table.schema';
 import { buildCatalog } from '../scripts/ai-demo/catalog';
 import type { MenuSearchFilters } from '../src/modules/menu/menu-search';
 
-if (process.env.CUSTOM_DNS_SERVERS)
-  dns.setServers(process.env.CUSTOM_DNS_SERVERS.split(','));
 jest.setTimeout(60000);
 type Body = {
   result: {
@@ -44,7 +41,7 @@ type Body = {
 const body = (res: { body: unknown }) => res.body as Body;
 
 describe('Phase 20 real Mongo/HTTP menu search, synthetic Phase 16 catalog', () => {
-  const dbName = `smartorder_p20_${randomUUID().replaceAll('-', '').slice(0, 20)}`;
+  const dbName = testDatabaseName();
   const tableId = new Types.ObjectId();
   const hiddenCategoryId = new Types.ObjectId();
   const hiddenDishId = new Types.ObjectId();
@@ -88,17 +85,13 @@ describe('Phase 20 real Mongo/HTTP menu search, synthetic Phase 16 catalog', () 
       tables: await tables.find().sort('_id').lean(),
     });
   beforeAll(async () => {
-    if (process.env.NODE_ENV === 'production' || !process.env.MONGODB_URI)
-      throw new Error(
-        'Requires non-production MONGODB_URI; test dbName is always isolated',
-      );
     jest
       .spyOn(globalThis, 'fetch')
       .mockRejectedValue(new Error('Live provider forbidden'));
     const fixture = await Test.createTestingModule({
       imports: [
         ConfigModule,
-        MongooseModule.forRoot(process.env.MONGODB_URI, {
+        MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,

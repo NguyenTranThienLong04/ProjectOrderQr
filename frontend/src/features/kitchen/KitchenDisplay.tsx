@@ -1,11 +1,12 @@
 import { OrderNoteMetadata } from '../../components/OrderNoteMetadata';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
+import { useEffect, useMemo, useState } from 'react';
+import { createStaffSocket } from '../../services/socket-client';
+import { useSnapshotRefresh } from '../../hooks/use-snapshot-refresh';
+import { bindSnapshotRecovery } from '../../services/snapshot-refresh';
 import { BellRing, ChefHat, Clock3, Flame, LoaderCircle, RefreshCw, StickyNote } from 'lucide-react';
 import { orderApi, type KitchenOrder, type KitchenItem } from '../../services/api/order';
 import { EmptyState, Feedback, PageHeader, StatusBadge, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
-import { API_URL as socketUrl } from '../../config/api-url';
 const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : 'Vui lòng thử lại.';
 const elapsed = (createdAt?: string, now = Date.now()) => {
   if (!createdAt) return 'Mới nhận';
@@ -21,28 +22,17 @@ export default function KitchenDisplay() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
-  const loadPromiseRef = useRef<Promise<void> | null>(null);
-
-  const load = useCallback(() => {
-    if (loadPromiseRef.current) return loadPromiseRef.current;
-    const request = orderApi.listForKitchen()
-      .then((nextOrders) => { setOrders(nextOrders); setError(null); })
-      .catch((loadError: unknown) => { setError(`Không thể tải danh sách bếp: ${getErrorMessage(loadError)}`); })
-      .finally(() => {
-        setLoading(false);
-        if (loadPromiseRef.current === request) loadPromiseRef.current = null;
-      });
-    loadPromiseRef.current = request;
-    return request;
-  }, []);
-
-  useEffect(() => { void load(); }, [load]);
+  const load = useSnapshotRefresh(
+    orderApi.listForKitchen,
+    (nextOrders) => { setOrders(nextOrders); setError(null); setLoading(false); },
+    (loadError) => { setError(`Không thể tải danh sách bếp: ${getErrorMessage(loadError)}`); setLoading(false); },
+  );
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 30000); return () => window.clearInterval(timer); }, []);
   useEffect(() => {
-    const socket = io(socketUrl);
-    socket.on('connect', () => socket.emit('join', { room: 'kitchen' }));
+    const socket = createStaffSocket();
+    const unbind = bindSnapshotRecovery(socket, load);
     socket.on('order:updated', () => void load());
-    return () => { socket.removeAllListeners(); socket.disconnect(); };
+    return () => { unbind(); socket.removeAllListeners(); socket.disconnect(); };
   }, [load]);
 
   const tickets = useMemo(() => orders.flatMap((order) => order.items.map((item) => ({ order, item }))), [orders]);
