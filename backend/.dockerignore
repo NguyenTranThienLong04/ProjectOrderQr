@@ -1,0 +1,24 @@
+# Explicit build inputs only. In particular, no local env, DB, uploads or tests.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!tsconfig.docker.json
+!nest-cli.json
+!src/
+!src/**
+!assets/
+!assets/fonts/
+!assets/fonts/NotoSans-Regular.ttf
+!assets/fonts/LICENSE.txt
+!docker/
+!docker/*.cjs
+**/*.spec.ts
+**/*.test.ts
+**/.env*
+**/*.pem
+**/*.key
+**/node_modules/**
+**/tmp/**
+**/temp/**

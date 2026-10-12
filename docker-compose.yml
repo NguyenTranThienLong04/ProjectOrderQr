@@ -1,44 +1,75 @@
 services:
   mongodb:
     image: mongo:7
-    container_name: hethongorder-mongodb
     restart: unless-stopped
-    ports:
-      - '27017:27017'
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     volumes:
       - mongodb_data:/data/db
-    environment:
-      MONGO_INITDB_DATABASE: hethongorder
+      - ./docker/mongo-healthcheck.js:/opt/mongo-healthcheck.js:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--quiet",
+          "--host",
+          "127.0.0.1",
+          "--file",
+          "/opt/mongo-healthcheck.js",
+        ]
+      interval: 5s
+      timeout: 5s
+      start_period: 15s
+      retries: 20
 
   backend:
     build: ./backend
+    restart: unless-stopped
+    init: true
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
     ports:
-      - '3000:3000'
+      - "${APP_BIND:-127.0.0.1}:${BACKEND_PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
-      MONGODB_URI: mongodb://mongodb:27017/hethongorder
-      CORS_ORIGIN: http://localhost:5173
-      FRONTEND_URL: http://localhost:5173
-      JWT_ACCESS_SECRET: change-me-in-production-access
-      JWT_REFRESH_SECRET: change-me-in-production-refresh
+      MONGODB_URI: mongodb://mongodb:27017/hethongorder?replicaSet=rs0
+      CORS_ORIGIN: ${PUBLIC_FRONTEND_URL:?Set PUBLIC_FRONTEND_URL in the root .env}
+      FRONTEND_URL: ${PUBLIC_FRONTEND_URL:?Set PUBLIC_FRONTEND_URL in the root .env}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Generate JWT_ACCESS_SECRET in the root .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Generate JWT_REFRESH_SECRET in the root .env}
       CLOUDINARY_CLOUD_NAME: ${CLOUDINARY_CLOUD_NAME:-}
       CLOUDINARY_API_KEY: ${CLOUDINARY_API_KEY:-}
       CLOUDINARY_API_SECRET: ${CLOUDINARY_API_SECRET:-}
       VNP_TMN_CODE: ${VNP_TMN_CODE:-}
       VNP_HASH_SECRET: ${VNP_HASH_SECRET:-}
-      VNP_URL: https://sandbox.vnpayment.vn/paymentv2/vpcpay.html
-      VNP_RETURN_URL: ${VNP_RETURN_URL:-http://localhost:3000/vnpay/return}
-      VNP_IPN_URL: ${VNP_IPN_URL:-}
+      VNP_URL: ${VNP_URL:-https://sandbox.vnpayment.vn/paymentv2/vpcpay.html}
+      VNP_RETURN_URL: ${PUBLIC_BACKEND_URL:?Set PUBLIC_BACKEND_URL in the root .env}/vnpay/return
+      AI_ENABLED: "false"
+    healthcheck:
+      test: ["CMD", "node", "docker/healthcheck.cjs"]
+      interval: 15s
+      timeout: 8s
+      start_period: 30s
+      retries: 5
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${PUBLIC_BACKEND_URL:?Set PUBLIC_BACKEND_URL in the root .env}
+    restart: unless-stopped
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
-      - '5173:80'
+      - "${APP_BIND:-127.0.0.1}:${FRONTEND_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
 
 volumes:
   mongodb_data:
