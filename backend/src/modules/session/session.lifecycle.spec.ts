@@ -4,6 +4,11 @@ import {
 } from '../../../test/support/test-database';
 import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Connection, createConnection, Types } from 'mongoose';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+import { createHmac } from 'node:crypto';
+import { SocketAuthService } from '../../gateway/socket-auth.service';
+import { SessionController } from './session.controller';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 import { TableStatus } from '../../common/enums/table-status.enum';
@@ -165,6 +170,76 @@ describe('Session/table lifecycle (isolated replica set)', () => {
     );
     return { table: physical, session };
   }
+
+  describe('signed QR entry with persisted BSON ownership', () => {
+    const secret = 'qr-regression-test-only-signing-secret';
+    const jwt = new JwtService();
+    function customerEntry() {
+      const auth = new SocketAuthService(
+        jwt,
+        new ConfigService({ JWT_ACCESS_SECRET: secret }),
+        first.sessions,
+        first.tables,
+        {} as never,
+      );
+      return {
+        auth,
+        controller: new SessionController(first.service, gateway as never, auth),
+      };
+    }
+
+    it('exchanges QR without cached credentials, then resumes and authenticates the customer', async () => {
+      const physical = await table('QR-A');
+      const { auth, controller } = customerEntry();
+      const qr = await auth.issueTableEntry(physical.id);
+      const grant = await controller.getActive({ tableId: physical.id }, qr);
+      expect(grant).toMatchObject({ tableId: physical.id, customerToken: expect.any(String) });
+      expect(await controller.getActive({ tableId: physical.id }, undefined, grant.customerToken))
+        .toMatchObject({ sessionId: grant.sessionId });
+      expect(await auth.authenticate({ customerToken: grant.customerToken }))
+        .toMatchObject({ kind: 'customer', sessionId: grant.sessionId, tableId: physical.id });
+      expect(await first.sessions.countDocuments()).toBe(1);
+    });
+
+    it('accepts matching existing ownership but rejects changed ownership and closed sessions', async () => {
+      const owner = await active('QR-A');
+      const { auth, controller } = customerEntry();
+      const qr = await auth.issueTableEntry(owner.table.id);
+      const grant = await controller.getActive({ tableId: owner.table.id }, qr);
+      const identity = await auth.verifyCustomer(grant.customerToken);
+      expect(grant.sessionId).toBe(owner.session.id);
+      await first.sessions.updateOne({ _id: owner.session._id }, { $set: { tableIds: [] } });
+      await expect(auth.authorizeCustomer(identity)).rejects.toMatchObject({ status: 401 });
+      await first.sessions.updateOne({ _id: owner.session._id }, { $set: { tableIds: [owner.table._id] } });
+      await first.tables.updateOne({ _id: owner.table._id }, { $set: { currentSessionId: new Types.ObjectId() } });
+      await expect(auth.authorizeCustomer(identity)).rejects.toMatchObject({ status: 401 });
+      await first.tables.updateOne({ _id: owner.table._id }, { $set: { currentSessionId: owner.session._id } });
+      await first.sessions.updateOne({ _id: owner.session._id }, { $set: { status: SessionStatus.CLOSED } });
+      await expect(auth.authorizeCustomer(identity)).rejects.toMatchObject({ status: 401 });
+      await expect(controller.getActive({ tableId: owner.table.id, sessionId: grant.sessionId }, qr))
+        .rejects.toMatchObject({ status: 404 });
+      expect(await first.sessions.countDocuments()).toBe(1);
+    });
+
+    it('rejects missing, invalid, expired and cross-table credentials before creating a session', async () => {
+      const a = await table('QR-A');
+      const b = await table('QR-B');
+      const { auth, controller } = customerEntry();
+      const qr = await auth.issueTableEntry(a.id);
+      const expired = jwt.sign({ tableId: a.id }, {
+        secret: createHmac('sha256', secret).update('customer-socket-capability-v1').digest('hex'),
+        algorithm: 'HS256', audience: 'table-entry', expiresIn: -1,
+      });
+      for (const token of [undefined, 'invalid', expired]) {
+        await expect(controller.getActive({ tableId: a.id }, token)).rejects.toMatchObject({ status: 401 });
+      }
+      await expect(controller.getActive({ tableId: b.id }, qr)).rejects.toMatchObject({ status: 401 });
+      expect(await first.sessions.countDocuments()).toBe(0);
+      const grant = await controller.getActive({ tableId: a.id }, qr);
+      await expect(controller.getActive({ tableId: b.id }, undefined, grant.customerToken))
+        .rejects.toMatchObject({ status: 401 });
+    });
+  });
   function order(
     owner: Awaited<ReturnType<typeof active>>,
     amount = 10000,

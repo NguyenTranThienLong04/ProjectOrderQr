@@ -3,7 +3,7 @@ import {
   OrderNoteAnalysisSchema,
 } from '../../common/schemas/order-note-analysis.schema';
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, SchemaTypes, Types } from 'mongoose';
 import { SessionStatus } from '../../common/enums/session-status.enum';
 
 export type SessionCartItemDocument = HydratedDocument<SessionCartItem>;
@@ -40,11 +40,11 @@ export const SessionCartItemSchema =
 
 @Schema({ timestamps: true, collection: 'sessions' })
 export class Session {
-  @Prop({ type: Types.ObjectId, ref: 'Table', required: true })
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'Table', required: true })
   tableId!: Types.ObjectId;
 
   /** Primary table is retained for backwards-compatible queries; tableIds is authoritative. */
-  @Prop({ type: [Types.ObjectId], ref: 'Table', default: [] })
+  @Prop({ type: [SchemaTypes.ObjectId], ref: 'Table', default: [] })
   tableIds!: Types.ObjectId[];
 
   @Prop({

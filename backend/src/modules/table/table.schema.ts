@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, SchemaTypes, Types } from 'mongoose';
 import { TableStatus } from '../../common/enums/table-status.enum';
 
 export type TableDocument = HydratedDocument<Table>;
@@ -23,7 +23,7 @@ export class Table {
   @Prop()
   menuUrl?: string;
 
-  @Prop({ type: Types.ObjectId, ref: 'Session', default: null })
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'Session', default: null })
   currentSessionId?: Types.ObjectId | null;
 
   /** Symmetric list of tables grouped before any customer has opened a session. */
