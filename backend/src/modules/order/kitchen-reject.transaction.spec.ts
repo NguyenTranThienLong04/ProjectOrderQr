@@ -34,6 +34,7 @@ import {
   PaymentIntentStatus,
 } from '../vnpay/payment-intent.schema';
 import { VnpayService } from '../vnpay/vnpay.service';
+import { CashShift, CashShiftSchema } from '../finance/cash-shift.schema';
 import { AdminService } from '../admin/admin.service';
 
 describe('Kitchen rejection (isolated replica set)', () => {
@@ -93,6 +94,7 @@ describe('Kitchen rejection (isolated replica set)', () => {
       state,
       gateway as never,
       invoice,
+      connection.model(CashShift.name, CashShiftSchema),
     );
     return {
       orders,
@@ -390,6 +392,7 @@ describe('Kitchen rejection (isolated replica set)', () => {
       await reject(order);
       let invoiceCode: string;
       if (method === 'CASH') {
+        await connections[0].model(CashShift.name).create({ staffId: waiter.id, staffName: 'Waiter', openingCash: 0 });
         const preview = await first.payments.getCashSettlementSummary(
           String(tableId),
         );

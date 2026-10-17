@@ -111,6 +111,7 @@ describe('Session/table lifecycle (isolated replica set)', () => {
       state,
       gateway as never,
       invoice,
+      {} as never,
     );
     return {
       orders,

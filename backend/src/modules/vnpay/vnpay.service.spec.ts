@@ -260,6 +260,7 @@ describe('VnpayService Session payment', () => {
       stateMachine as never,
       gateway as never,
       { renderSession: jest.fn() } as never,
+      {} as never,
     );
   });
 

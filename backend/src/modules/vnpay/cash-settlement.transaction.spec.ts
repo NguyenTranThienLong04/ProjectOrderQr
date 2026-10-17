@@ -26,6 +26,7 @@ import {
   UNRESOLVED_PAYMENT_FILTER,
 } from './payment-intent.schema';
 import { VnpayService } from './vnpay.service';
+import { CashShift, CashShiftSchema } from '../finance/cash-shift.schema';
 
 describe('Cash settlement lifecycle (isolated replica set)', () => {
   const connections: Connection[] = [];
@@ -78,6 +79,7 @@ describe('Cash settlement lifecycle (isolated replica set)', () => {
       state,
       gateway as never,
       invoice,
+      connection.model(CashShift.name, CashShiftSchema),
     );
     const orderService = new OrderService(
       orders,
@@ -134,6 +136,7 @@ describe('Cash settlement lifecycle (isolated replica set)', () => {
     jest.restoreAllMocks();
     jest.clearAllMocks();
     await clearTestCollections(connections[0]);
+    await connections[0].model(CashShift.name).create({ staffId: actor.id, staffName: 'Waiter', openingCash: 0 });
     tableId = new Types.ObjectId();
     sessionId = new Types.ObjectId();
     await first.sessions.create({

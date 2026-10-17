@@ -19,6 +19,7 @@ import { UserRole } from '../../common/enums/user-role.enum';
 import { lifecycleTransaction } from '../session/lifecycle-transaction';
 import { AppGateway } from '../../gateway/app.gateway';
 import { InvoiceLookupService } from '../invoice/invoice-lookup.service';
+import { CashShift, CashShiftDocument } from '../finance/cash-shift.schema';
 import { ensureInvoiceCode, withInvoiceCodeRetry } from './invoice-code';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStateMachineService } from '../order/order-state-machine.service';
@@ -93,6 +94,8 @@ export class VnpayService implements OnModuleInit {
     private readonly stateMachine: OrderStateMachineService,
     private readonly gateway: AppGateway,
     private readonly invoiceService: InvoiceLookupService,
+    @InjectModel(CashShift.name)
+    private readonly cashShiftModel: Model<CashShiftDocument>,
   ) {}
 
   async onModuleInit() {
@@ -529,6 +532,19 @@ export class VnpayService implements OnModuleInit {
           );
 
         const now = new Date();
+        // Serialize with closing this drawer. The receipt and fence commit or
+        // roll back together; never select a CLOSED shift or retry into a new one.
+        const cashShift = await this.cashShiftModel
+          .findOneAndUpdate(
+            { staffId: new Types.ObjectId(actor.id), status: 'OPEN' },
+            { $inc: { version: 1 } },
+            { session: mongoSession, returnDocument: 'after' },
+          )
+          .exec();
+        if (!cashShift)
+          throw new ConflictException(
+            'Hãy mở ca tiền mặt của bạn trước khi thu CASH',
+          );
         // Shared write fence with cart/create-order/move/merge/clear. Never retry
         // the staff confirmation against a newer session snapshot.
         const closed = await this.sessionModel
@@ -573,8 +589,9 @@ export class VnpayService implements OnModuleInit {
           ipnConfirmed: false,
           expiresAt: now,
           completedAt: now,
-          settledByUserId: actor.id,
+          settledByUserId: new Types.ObjectId(actor.id),
           settledByRole: actor.role,
+          cashShiftId: cashShift._id,
         }).save({ session: mongoSession });
         if (unresolved.length) {
           const resolved = await this.paymentIntentModel

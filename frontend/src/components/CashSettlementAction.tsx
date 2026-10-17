@@ -1,5 +1,7 @@
 import { useRef, useState } from 'react';
 import { Banknote, LoaderCircle } from 'lucide-react';
+import { Link, useLocation } from 'react-router-dom';
+import { financeApi } from '../services/api/finance';
 import {
   paymentApi,
   type CashSettlementReceipt,
@@ -31,6 +33,8 @@ export function CashSettlementAction({
   const [summary, setSummary] = useState<CashSettlementSummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [needsShift, setNeedsShift] = useState(false);
+  const location = useLocation();
   const pending = useRef(false);
   const preview = async () => {
     if (pending.current) return;
@@ -39,7 +43,10 @@ export function CashSettlementAction({
     setBusy(true);
     setSummary(null);
     setError('');
+    setNeedsShift(false);
     try {
+      const shift = await financeApi.current();
+      if (!shift) { setNeedsShift(true); return; }
       setSummary(await paymentApi.getCashSettlementSummary(tableId));
     } catch (error) {
       setError(message(error));
@@ -133,6 +140,7 @@ export function CashSettlementAction({
         <div aria-busy={busy} className="space-y-3">
           {busy && <p role="status">Đang xử lý…</p>}
           {error && <Feedback tone="danger">{error}</Feedback>}
+          {needsShift && <Feedback tone="warning">Bạn cần mở ca trước khi thu CASH. <Link className="font-semibold underline" to={location.pathname.startsWith('/admin') ? '/admin/cash-shifts' : '/waiter/cash-shifts'}>Mở ca tiền mặt</Link></Feedback>}
           {summary && (
             <dl className="space-y-3 text-sm">
               <div>

@@ -106,6 +106,7 @@ async function main() {
         }, role);
         await staff.route(/\/socket.io\//, async route => { try { const url = new URL(route.request().url()); await route.fulfill({ response: await route.fetch({ url: `${origin}${url.pathname}${url.search}` }) }); } catch {} });
         await staff.route(url => url.pathname === '/auth/me', route => route.fulfill({ json: { user: { id: 'fixture-user', role, fullName: 'Nguyễn An' } } }));
+        await staff.route(url => url.pathname === '/cash-shifts/current', route => route.fulfill({ json: { id: 'fixture-shift', staffId: 'fixture-user', status: 'OPEN', openingCash: 0, cashSales: 0, expectedCash: 0, version: 0 } }));
         await staff.route(url => url.pathname === '/tables', route => route.fulfill({ json: [{
           _id: tableId, tableCode: 'A01', capacity: 4, qrCodeUrl: '',
           status: settled ? 'available' : 'waiting_payment', currentSessionId: settled ? null : sessionId,

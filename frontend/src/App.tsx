@@ -15,6 +15,8 @@ import { StaffLayout } from './features/staff/StaffLayout';
 import { PaymentResult } from './features/payment/PaymentResult';
 import { PromotionManager } from './features/admin/PromotionManager';
 import { InvoiceLookup } from './features/admin/InvoiceLookup';
+import { RevenueDashboard } from './features/admin/RevenueDashboard';
+import { CashShifts } from './features/finance/CashShifts';
 
 function RouteFocus() {
   const { pathname } = useLocation();
@@ -41,6 +43,8 @@ function App() {
           <Route path="analytics" element={<RequireRole roles={["admin"]}><AdminDashboard /></RequireRole>} />
           <Route path="tables" element={<TableManager />} />
           <Route path="invoices" element={<InvoiceLookup />} />
+          <Route path="revenue" element={<RevenueDashboard />} />
+          <Route path="cash-shifts" element={<CashShifts admin />} />
           <Route path="categories" element={<RequireRole roles={["admin"]}><CategoryManager /></RequireRole>} />
           <Route path="dishes" element={<RequireRole roles={["admin"]}><DishManager /></RequireRole>} />
           <Route path="users" element={<RequireRole roles={["admin"]}><UserManager /></RequireRole>} />
@@ -52,6 +56,7 @@ function App() {
          <Route path="/kitchen" element={<RequireRole roles={["kitchen"]}><KitchenDisplay /></RequireRole>} />
          <Route path="/waiter" element={<RequireRole roles={["waiter"]}><WaiterDashboard /></RequireRole>} />
          <Route path="/waiter/invoices" element={<RequireRole roles={["waiter"]}><main id="main-content" tabIndex={-1} className="px-4 py-6 sm:px-6"><InvoiceLookup /></main></RequireRole>} />
+         <Route path="/waiter/cash-shifts" element={<RequireRole roles={["waiter"]}><main id="main-content" tabIndex={-1} className="mx-auto max-w-7xl px-4 py-6 sm:px-6"><CashShifts /></main></RequireRole>} />
         </Route>
         {/* Redirect Root to Login */}
         <Route path="/" element={<Navigate to="/login" replace />} />

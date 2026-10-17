@@ -1,5 +1,5 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
-import { HydratedDocument, Types } from 'mongoose';
+import { HydratedDocument, SchemaTypes, Types } from 'mongoose';
 import { generateInvoiceCode, INVOICE_CODE_PATTERN } from './invoice-code';
 
 export enum PaymentIntentStatus {
@@ -79,6 +79,10 @@ export class PaymentIntent {
   @Prop({ type: String, enum: ['admin', 'waiter'] })
   settledByRole?: string;
 
+  /** Set once, in the same transaction that settles CASH and fences the OPEN shift. */
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'CashShift', immutable: true })
+  cashShiftId?: Types.ObjectId;
+
   /** Only populated from a verified, real IPN after cash supersession. */
   @Prop({ type: String, enum: ['succeeded', 'failed'] })
   lateProviderStatus?: 'succeeded' | 'failed';
@@ -149,6 +153,8 @@ PaymentIntentSchema.index(
 );
 
 PaymentIntentSchema.index({ txnRef: 1 }, { unique: true });
+PaymentIntentSchema.index({ status: 1, completedAt: -1, _id: -1 });
+PaymentIntentSchema.index({ cashShiftId: 1, completedAt: -1 });
 PaymentIntentSchema.index({ sessionId: 1, createdAt: -1 });
 PaymentIntentSchema.index({ status: 1, expiresAt: 1 });
 PaymentIntentSchema.index(

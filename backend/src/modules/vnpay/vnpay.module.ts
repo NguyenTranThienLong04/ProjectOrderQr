@@ -9,6 +9,7 @@ import { PaymentIntent, PaymentIntentSchema } from './payment-intent.schema';
 import { VnpayController } from './vnpay.controller';
 import { VnpayService } from './vnpay.service';
 import { CashSettlementController } from './cash-settlement.controller';
+import { CashShift, CashShiftSchema } from '../finance/cash-shift.schema';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { CashSettlementController } from './cash-settlement.controller';
       { name: Session.name, schema: SessionSchema },
       { name: Table.name, schema: TableSchema },
       { name: PaymentIntent.name, schema: PaymentIntentSchema },
+      { name: CashShift.name, schema: CashShiftSchema },
     ]),
   ],
   controllers: [VnpayController, CashSettlementController],

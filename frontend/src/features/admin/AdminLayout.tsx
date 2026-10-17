@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import {
   ChartNoAxesCombined,
+  Banknote,
+  Wallet,
   ChevronRight,
   Grid2X2,
   LogOut,
@@ -25,6 +27,8 @@ interface User {
 
 const menuItems = [
   { name: 'Tổng quan', path: '/admin/analytics', icon: ChartNoAxesCombined },
+  { name: 'Doanh thu', path: '/admin/revenue', icon: Banknote },
+  { name: 'Đối soát tiền mặt', path: '/admin/cash-shifts', icon: Wallet },
   { name: 'Bàn & QR', path: '/admin/tables', icon: Grid2X2 },
   { name: 'Danh mục', path: '/admin/categories', icon: Tags },
   { name: 'Món ăn', path: '/admin/dishes', icon: Soup },

@@ -63,6 +63,11 @@ describe('Cash settlement HTTP authorization and QR lifecycle', () => {
           email: user.email,
         }),
       );
+      if (role !== UserRole.KITCHEN) {
+        await request(app.getHttpServer()).post('/cash-shifts')
+          .set('Authorization', `Bearer ${tokens.get(role)}`)
+          .send({ openingCash: 0 }).expect(201);
+      }
     }
   });
   afterAll(async () => {

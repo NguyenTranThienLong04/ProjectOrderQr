@@ -24,8 +24,8 @@ export function StaffLayout() {
         <div className="ml-auto min-w-0 text-right"><p className="max-w-32 truncate text-sm font-semibold text-slate-900 sm:max-w-none">{user.fullName}</p><p className="hidden text-xs text-slate-500 sm:block">{user.role === 'kitchen' ? 'Nhân viên bếp' : 'Nhân viên phục vụ'}</p></div>
         <button onClick={handleLogout} aria-label="Đăng xuất" className="grid h-11 w-11 place-items-center rounded-lg border border-slate-200 text-slate-600 transition hover:border-red-200 hover:bg-red-50 hover:text-red-700 sm:flex sm:w-auto sm:px-3"><LogOut aria-hidden="true" className="h-4 w-4" /><span className="hidden text-sm font-semibold sm:inline">Đăng xuất</span></button>
       </div>
-      {user.role === 'waiter' && <nav aria-label="Điều hướng phục vụ" className="mx-auto flex max-w-[100rem] gap-2 px-4 pb-2 sm:px-6">
-        {[{ to: '/waiter', label: 'Điều phối phục vụ' }, { to: '/waiter/invoices', label: 'Tra cứu hóa đơn' }].map(({ to, label }) => <NavLink key={to} to={to} end className={({ isActive }) => `inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold ${isActive ? 'bg-brand-50 text-brand-800' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</NavLink>)}
+      {user.role === 'waiter' && <nav aria-label="Điều hướng phục vụ" className="mx-auto flex max-w-[100rem] flex-wrap gap-2 px-4 pb-2 sm:px-6">
+        {[{ to: '/waiter', label: 'Điều phối phục vụ' }, { to: '/waiter/invoices', label: 'Tra cứu hóa đơn' }, { to: '/waiter/cash-shifts', label: 'Ca tiền mặt' }].map(({ to, label }) => <NavLink key={to} to={to} end className={({ isActive }) => `inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold ${isActive ? 'bg-brand-50 text-brand-800' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</NavLink>)}
       </nav>}
     </header>
     <Outlet />

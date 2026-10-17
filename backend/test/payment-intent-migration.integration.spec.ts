@@ -566,6 +566,8 @@ describe('Payment intent migration (owned replica set only)', () => {
           message: 'private-uri',
         }),
       } as never,
+      // Constructor dependency added by CASH shift attribution.
+      {} as never,
       {} as never,
       {} as never,
       {} as never,

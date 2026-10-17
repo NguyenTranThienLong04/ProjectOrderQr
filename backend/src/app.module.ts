@@ -15,6 +15,7 @@ import { MenuModule } from './modules/menu/menu.module';
 import { RecommendationModule } from './modules/menu/recommendation.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { VnpayModule } from './modules/vnpay/vnpay.module';
+import { FinanceModule } from './modules/finance/finance.module';
 import { ReviewModule } from './modules/review/review.module';
 import { AiModule } from './modules/ai/ai.module';
 import { CatalogDraftAiModule } from './modules/ai/catalog-draft/catalog-draft-ai.module';
@@ -37,6 +38,7 @@ import { CatalogDraftAiModule } from './modules/ai/catalog-draft/catalog-draft-a
     GatewayModule,
     AdminModule,
     VnpayModule,
+    FinanceModule,
     ReviewModule,
     AiModule,
     CatalogDraftAiModule,

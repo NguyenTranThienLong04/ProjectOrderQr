@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import AnalyticsCopilot from './AnalyticsCopilot';
 import ReviewIntelligence from './ReviewIntelligence';
 import { createStaffSocket } from '../../services/socket-client';
@@ -57,6 +58,7 @@ export default function AdminDashboard() {
 
   return <div className="space-y-6">
     <PageHeader eyebrow="Analytics" title="Tổng quan vận hành" description="Theo dõi doanh thu, đơn hàng và hiệu suất món ăn từ dữ liệu tổng hợp thực tế." />
+    <Feedback>Các chỉ số tại đây tổng hợp theo đơn hàng. Xem khoản thu CASH/VNPAY và hóa đơn tại <Link to="/admin/revenue" className="font-semibold underline">Báo cáo doanh thu</Link>.</Feedback>
     <section aria-label="Bộ lọc báo cáo" className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><form onSubmit={(event) => { event.preventDefault(); void loadAnalytics(); }} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_1fr_auto] lg:items-end"><label className={labelClass}>Từ ngày<input type="date" value={fromDate} onChange={(event) => setFromDate(event.target.value)} className={`${controlClass} mt-1.5`} /></label><label className={labelClass}>Đến ngày<input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} className={`${controlClass} mt-1.5`} /></label><label className={labelClass}>Nhóm dữ liệu<select value={groupBy} onChange={(event) => setGroupBy(event.target.value as 'day' | 'month' | 'year')} className={`${controlClass} mt-1.5`}><option value="day">Theo ngày</option><option value="month">Theo tháng</option><option value="year">Theo năm</option></select></label><button type="submit" disabled={loading} className={primaryButtonClass}>{loading ? <RefreshCw aria-hidden="true" className="h-4 w-4 animate-spin" /> : <CalendarRange aria-hidden="true" className="h-4 w-4" />}Áp dụng</button></form></section>
     <AnalyticsCopilot fromDate={fromDate} toDate={toDate} />
     <ReviewIntelligence fromDate={fromDate} toDate={toDate} />

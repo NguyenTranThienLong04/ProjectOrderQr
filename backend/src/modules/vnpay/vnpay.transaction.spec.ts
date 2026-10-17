@@ -59,6 +59,7 @@ describe('Payment correctness (isolated replica set)', () => {
       state,
       gateway as never,
       {} as never,
+      {} as never,
     );
     return {
       orders,
