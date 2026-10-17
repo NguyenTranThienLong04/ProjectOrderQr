@@ -34,6 +34,7 @@ const statusPresentation: Record<string, { label: string; tone: Tone; icon: Luci
   Served: { label: 'Đã phục vụ', tone: 'brand', icon: CheckCircle2 },
   Paid: { label: 'Đã thanh toán', tone: 'success', icon: CreditCard },
   Cancelled: { label: 'Đã hủy', tone: 'danger', icon: XCircle },
+  Rejected: { label: 'Bếp từ chối', tone: 'danger', icon: XCircle },
   available: { label: 'Bàn trống', tone: 'success', icon: CheckCircle2 },
   occupied: { label: 'Đang phục vụ', tone: 'warning', icon: UsersRound },
   waiting_payment: { label: 'Chờ thanh toán', tone: 'info', icon: CreditCard },

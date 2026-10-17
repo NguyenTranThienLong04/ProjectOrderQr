@@ -124,6 +124,7 @@ describe('VnpayService Session payment', () => {
       }),
     };
     const sessionModel = {
+      updateOne: jest.fn(() => query({ modifiedCount: 1 })),
       findOne: jest.fn((filter: Record<string, any>) =>
         query(
           filter._id.toString() === sessionId.toString() &&
@@ -338,7 +339,12 @@ describe('VnpayService Session payment', () => {
       );
       expect(summary.orders[0].status).toBe(status);
       expect(summary.orders[0].items).toEqual([
-        { dishName: 'Món snapshot', unitPrice: 50_000, quantity: 1 },
+        {
+          dishName: 'Món snapshot',
+          unitPrice: 50_000,
+          quantity: 1,
+          status: status === OrderStatus.PAID ? OrderStatus.SERVED : status,
+        },
       ]);
       expect(summary.canPay).toBe(status === OrderStatus.SERVED);
       expect(summary.payableTotal).toBe(

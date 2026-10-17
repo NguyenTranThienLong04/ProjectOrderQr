@@ -17,6 +17,16 @@ const render = (orders = [order], lang = 'vi') =>
   renderToStaticMarkup(createElement(OrderProgress, { orders, lang }));
 const text = (html) => html.replace(/<[^>]*>/g, '');
 
+test('rejected item keeps its snapshot price, reason and explicit no-charge label in VI/EN', () => {
+  const updated = [{ ...order, status: 'Served', totalAmount: 0, items: [{ ...item, status: 'Rejected', rejectionReason: 'Hết nguyên liệu' }] }];
+  const vi = text(render(updated));
+  assert.match(vi, /Bếp từ chối/);
+  assert.match(vi, /Hết nguyên liệu/);
+  assert.match(vi, /Không tính tiền/);
+  assert.match(vi, /50\.000/);
+  assert.match(text(render(updated, 'en')), /Rejected by kitchen.*Hết nguyên liệu.*Not charged/);
+});
+
 test('one order / one item renders snapshot unit price, name, note and image, never Mongo ID', () => {
   const html = render();
   const visible = text(html);

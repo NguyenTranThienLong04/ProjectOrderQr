@@ -1,4 +1,8 @@
-import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  OrderStatus,
+  OrderItemStatus,
+  REJECTED_ITEM_STATUS,
+} from '../../common/enums/order-status.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
 
 // Order stays Pending during item preparation; Preparing/Ready are supported
@@ -13,7 +17,7 @@ export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
 };
 
 export const ITEM_TRANSITIONS: Partial<
-  Record<OrderStatus, { to: OrderStatus; roles: readonly UserRole[] }>
+  Record<OrderItemStatus, { to: OrderStatus; roles: readonly UserRole[] }>
 > = {
   [OrderStatus.PENDING]: {
     to: OrderStatus.PREPARING,
@@ -40,3 +44,24 @@ export function orderSourcesFor(to: OrderStatus) {
 }
 
 export const PROCESSING_ORDER_STATUSES = orderSourcesFor(OrderStatus.SERVED);
+
+export const TERMINAL_ITEM_STATUSES = [
+  OrderStatus.SERVED,
+  REJECTED_ITEM_STATUS,
+] as const;
+
+export function isFinishedItem(status: OrderItemStatus) {
+  return status === OrderStatus.SERVED || status === REJECTED_ITEM_STATUS;
+}
+
+export function canRejectItem(
+  orderStatus: OrderStatus,
+  itemStatus: OrderItemStatus,
+  role: UserRole,
+) {
+  return (
+    role === UserRole.KITCHEN &&
+    itemStatus === OrderStatus.PENDING &&
+    PROCESSING_ORDER_STATUSES.includes(orderStatus)
+  );
+}

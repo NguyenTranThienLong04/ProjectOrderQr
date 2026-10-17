@@ -2,6 +2,7 @@ const integrationTests = [
   'src/modules/auth/auth.regression.spec.ts',
   'src/modules/order/order-state-machine.concurrent.spec.ts',
   'src/modules/order/order.transaction.spec.ts',
+  'src/modules/order/kitchen-reject.transaction.spec.ts',
   'src/modules/session/session.lifecycle.spec.ts',
   'src/modules/vnpay/vnpay.transaction.spec.ts',
   'src/modules/vnpay/cash-settlement.transaction.spec.ts',

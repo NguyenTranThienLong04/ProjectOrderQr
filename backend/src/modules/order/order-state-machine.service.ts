@@ -8,7 +8,11 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model, Types, UpdateQuery } from 'mongoose';
 import { ActorType } from '../../common/enums/actor-type.enum';
-import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  OrderStatus,
+  OrderItemStatus,
+  REJECTED_ITEM_STATUS,
+} from '../../common/enums/order-status.enum';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { Order, OrderDocument } from './order.schema';
 import { Table, TableDocument } from '../table/table.schema';
@@ -18,7 +22,20 @@ import {
   ITEM_TRANSITIONS,
   orderSourcesFor,
   PROCESSING_ORDER_STATUSES,
+  canRejectItem,
+  isFinishedItem,
+  TERMINAL_ITEM_STATUSES,
 } from './order-transition.rules';
+import { lifecycleTransaction } from '../session/lifecycle-transaction';
+import {
+  PaymentIntent,
+  PaymentIntentDocument,
+  UNRESOLVED_PAYMENT_FILTER,
+} from '../vnpay/payment-intent.schema';
+import { Session, SessionDocument } from '../session/session.schema';
+import { SessionStatus } from '../../common/enums/session-status.enum';
+import { billableSubtotal } from './order-billing';
+import { promotionAmounts } from '../promotion/promotion-amounts';
 
 @Injectable()
 export class OrderStateMachineService {
@@ -30,9 +47,12 @@ export class OrderStateMachineService {
   async transitionItem(
     orderId: string,
     itemId: string,
-    next: OrderStatus,
+    next: OrderItemStatus,
     actor: { id: string; role: UserRole },
+    rejectionReason?: string,
   ) {
+    if (next === REJECTED_ITEM_STATUS)
+      return this.rejectItem(orderId, itemId, actor, rejectionReason);
     const order = await this.updateState(orderId, (current) => {
       if (!PROCESSING_ORDER_STATUSES.includes(current.status))
         throw new ForbiddenException('Đơn không còn cho phép xử lý món');
@@ -57,25 +77,25 @@ export class OrderStateMachineService {
         },
         changedAt: new Date(),
       };
-      const update: UpdateQuery<OrderDocument> = {
-        $set: { [`items.${index}.status`]: next },
-        $push: { [`items.${index}.statusHistory`]: history },
+      const set: Record<string, unknown> = { [`items.${index}.status`]: next };
+      const push: Record<string, unknown> = {
+        [`items.${index}.statusHistory`]: history,
       };
       // Compute from the version that will actually be committed. A competing
       // item transition makes the CAS fail and this calculation runs again.
       if (
         next === OrderStatus.SERVED &&
         current.items.every(
-          (entry, i) => i === index || entry.status === OrderStatus.SERVED,
+          (entry, i) => i === index || isFinishedItem(entry.status),
         )
       ) {
-        update.$set!.status = OrderStatus.SERVED;
-        update.$push!.statusHistory = {
+        set.status = OrderStatus.SERVED;
+        push.statusHistory = {
           ...history,
           fromStatus: current.status,
         };
       }
-      return update;
+      return { $set: set, $push: push };
     });
     if (order.status === OrderStatus.SERVED) {
       const hasUnservedActiveOrder = await this.orderModel.exists({
@@ -94,6 +114,166 @@ export class OrderStateMachineService {
       }
     }
     return order;
+  }
+
+  private async rejectItem(
+    orderId: string,
+    itemId: string,
+    actor: { id: string; role: UserRole },
+    rejectionReason?: string,
+  ): Promise<OrderDocument> {
+    if (actor.role !== UserRole.KITCHEN)
+      throw new ForbiddenException('Chỉ bếp được từ chối món');
+    const reason =
+      typeof rejectionReason === 'string' ? rejectionReason.trim() : '';
+    if (!reason || reason.length > 250)
+      throw new BadRequestException('Lý do từ chối phải có từ 1 đến 250 ký tự');
+    return lifecycleTransaction(this.orderModel.db, async (mongoSession) => {
+      const current = await this.orderModel
+        .findById(orderId)
+        .session(mongoSession)
+        .exec();
+      if (!current) throw new NotFoundException('Không tìm thấy đơn');
+      const index = current.items.findIndex(
+        (item) => item._id.toString() === itemId,
+      );
+      if (index < 0)
+        throw new NotFoundException('Không tìm thấy món trong đơn');
+      const item = current.items[index];
+      if (!canRejectItem(current.status, item.status, actor.role))
+        throw new ForbiddenException(
+          'Chỉ được từ chối món Pending trong đơn đang phục vụ',
+        );
+
+      // Share a document write with checkout/cart/lifecycle transactions so a
+      // concurrent checkout cannot appear after the unresolved-intent read.
+      const claimedSession = await this.orderModel.db
+        .model<SessionDocument>(Session.name)
+        .updateOne(
+          { _id: current.sessionId, status: SessionStatus.ACTIVE },
+          { $inc: { __v: 1 } },
+          { session: mongoSession },
+        )
+        .exec();
+      if (claimedSession.modifiedCount !== 1)
+        throw new ConflictException('Phiên ăn không còn hoạt động');
+      const unresolved = await this.orderModel.db
+        .model<PaymentIntentDocument>(PaymentIntent.name)
+        .exists({
+          $and: [
+            {
+              $or: [
+                { sessionId: current.sessionId },
+                { coveredOrderIds: current._id },
+              ],
+            },
+            UNRESOLVED_PAYMENT_FILTER,
+          ],
+        })
+        .session(mongoSession);
+      if (unresolved)
+        throw new ConflictException(
+          'Phiên đang có checkout chưa được xác nhận; chưa thể từ chối món',
+        );
+      if (
+        (current.promotionCode || current.discountAmount > 0) &&
+        !current.promotionSnapshot
+      )
+        throw new ConflictException(
+          'Đơn cũ thiếu snapshot quy tắc giảm giá; chưa thể tính lại khi từ chối món',
+        );
+
+      const items = current.items.map((entry, i) => ({
+        status: i === index ? REJECTED_ITEM_STATUS : entry.status,
+        unitPrice: entry.unitPrice,
+        quantity: entry.quantity,
+      }));
+      const amounts = promotionAmounts(
+        current.promotionSnapshot,
+        billableSubtotal(items),
+      );
+      const aggregate = items.every(
+        (entry) => entry.status === REJECTED_ITEM_STATUS,
+      )
+        ? OrderStatus.CANCELLED
+        : items.every((entry) => isFinishedItem(entry.status))
+          ? OrderStatus.SERVED
+          : current.status;
+      const changedAt = new Date();
+      const history = {
+        fromStatus: item.status,
+        toStatus: REJECTED_ITEM_STATUS,
+        changedBy: {
+          actorType: ActorType.USER,
+          userId: new Types.ObjectId(actor.id),
+          role: actor.role,
+        },
+        changedAt,
+        note: reason,
+        source: 'kitchen_reject',
+        amount: amounts.totalAmount,
+      };
+      const updated = await this.orderModel
+        .findOneAndUpdate(
+          {
+            _id: current._id,
+            sessionId: current.sessionId,
+            status: current.status,
+            __v: current.__v ?? { $exists: false },
+          },
+          {
+            $set: {
+              [`items.${index}.status`]: REJECTED_ITEM_STATUS,
+              [`items.${index}.rejectionReason`]: reason,
+              [`items.${index}.rejectedBy`]: new Types.ObjectId(actor.id),
+              [`items.${index}.rejectedAt`]: changedAt,
+              ...amounts,
+              status: aggregate,
+            },
+            $inc: { __v: 1 },
+            $push: {
+              [`items.${index}.statusHistory`]: history,
+              ...(aggregate !== current.status
+                ? {
+                    statusHistory: {
+                      ...history,
+                      fromStatus: current.status,
+                      toStatus: aggregate,
+                    },
+                  }
+                : {}),
+            },
+          },
+          {
+            returnDocument: 'after',
+            runValidators: true,
+            session: mongoSession,
+          },
+        )
+        .exec();
+      if (!updated)
+        throw new ConflictException('Món vừa thay đổi, vui lòng tải lại');
+      if (
+        aggregate === OrderStatus.SERVED ||
+        aggregate === OrderStatus.CANCELLED
+      ) {
+        const unserved = await this.orderModel
+          .exists({
+            sessionId: current.sessionId,
+            status: { $in: PROCESSING_ORDER_STATUSES },
+          })
+          .session(mongoSession);
+        if (!unserved)
+          await this.tableModel
+            .updateMany(
+              { currentSessionId: current.sessionId },
+              { $set: { status: TableStatus.WAITING_PAYMENT } },
+              { session: mongoSession },
+            )
+            .exec();
+      }
+      return updated;
+    });
   }
 
   /**
@@ -121,7 +301,7 @@ export class OrderStateMachineService {
           _id: orderId,
           status: { $in: orderSourcesFor(next) },
           items: {
-            $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+            $not: { $elemMatch: { status: { $nin: TERMINAL_ITEM_STATUSES } } },
           },
         },
         {
@@ -205,7 +385,7 @@ export class OrderStateMachineService {
       coveredOrders.some(
         (order) =>
           !canTransitionOrder(order.status, OrderStatus.PAID) ||
-          order.items.some((item) => item.status !== OrderStatus.SERVED),
+          order.items.some((item) => !isFinishedItem(item.status)),
       )
     ) {
       throw new BadRequestException(
@@ -221,7 +401,7 @@ export class OrderStateMachineService {
           sessionId,
           status: { $in: orderSourcesFor(OrderStatus.PAID) },
           items: {
-            $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+            $not: { $elemMatch: { status: { $nin: TERMINAL_ITEM_STATUSES } } },
           },
         },
         {

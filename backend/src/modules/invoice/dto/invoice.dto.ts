@@ -31,6 +31,9 @@ export interface InvoiceDetailDto {
       quantity: number;
       unitPrice: number;
       note?: string;
+      status?: string;
+      rejectionReason?: string;
+      chargedAmount?: number;
     }[];
     subtotalAmount: number;
     discountAmount: number;

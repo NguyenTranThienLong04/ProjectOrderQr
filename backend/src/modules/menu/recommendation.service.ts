@@ -54,8 +54,10 @@ export class RecommendationService {
         orders.map((order) => [
           ...new Set(
             order.items
-              .filter((item) =>
-                [OrderStatus.SERVED, OrderStatus.PAID].includes(item.status),
+              .filter(
+                (item) =>
+                  item.status === OrderStatus.SERVED ||
+                  item.status === OrderStatus.PAID,
               )
               .map((item) => item.dishId?.toString())
               .filter((id): id is string => !!id && /^[a-f\d]{24}$/i.test(id)),

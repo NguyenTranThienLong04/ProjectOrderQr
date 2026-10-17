@@ -10,10 +10,12 @@ import { CreatePromotionDto } from './dto/create-promotion.dto';
 import { UpdatePromotionDto } from './dto/update-promotion.dto';
 import { Promotion, PromotionDocument } from './promotion.schema';
 import { PromotionType } from './promotion-type.enum';
+import { promotionAmounts, PromotionRule } from './promotion-amounts';
 
 export interface AppliedPromotion {
   promotionId?: Types.ObjectId;
   code?: string;
+  snapshot?: PromotionRule;
   subtotalAmount: number;
   discountAmount: number;
   totalAmount: number;
@@ -129,7 +131,9 @@ export class PromotionService {
     if (!code?.trim())
       return { subtotalAmount, discountAmount: 0, totalAmount: subtotalAmount };
     const promotion = await this.promotionModel
-      .findOne({ code: code.trim().toUpperCase() }, null, { session: mongoSession })
+      .findOne({ code: code.trim().toUpperCase() }, null, {
+        session: mongoSession,
+      })
       .exec();
     if (!promotion) throw new NotFoundException('Mã giảm giá không tồn tại');
     this.assertEligible(promotion, subtotalAmount, now);
@@ -146,6 +150,11 @@ export class PromotionService {
     return {
       ...this.calculate(reserved, subtotalAmount),
       promotionId: reserved._id,
+      snapshot: {
+        type: reserved.type,
+        value: reserved.value,
+        minOrderAmount: reserved.minOrderAmount,
+      },
     };
   }
 
@@ -182,15 +191,9 @@ export class PromotionService {
     promotion: PromotionDocument,
     subtotalAmount: number,
   ): AppliedPromotion {
-    const discountAmount =
-      promotion.type === PromotionType.PERCENTAGE
-        ? Math.round((subtotalAmount * promotion.value) / 100)
-        : Math.min(promotion.value, subtotalAmount);
     return {
       code: promotion.code,
-      subtotalAmount,
-      discountAmount,
-      totalAmount: Math.max(0, subtotalAmount - discountAmount),
+      ...promotionAmounts(promotion, subtotalAmount),
     };
   }
 

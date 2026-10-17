@@ -5,9 +5,12 @@ import { useSnapshotRefresh } from '../../hooks/use-snapshot-refresh';
 import { bindSnapshotRecovery } from '../../services/snapshot-refresh';
 import { BellRing, ChefHat, Clock3, Flame, LoaderCircle, RefreshCw, StickyNote } from 'lucide-react';
 import { orderApi, type KitchenOrder, type KitchenItem } from '../../services/api/order';
-import { EmptyState, Feedback, PageHeader, StatusBadge, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
+import { EmptyState, Feedback, Modal, PageHeader, StatusBadge, primaryButtonClass, secondaryButtonClass, dangerButtonClass, controlClass, labelClass } from '../../components/ui';
 
-const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : 'Vui lòng thử lại.';
+const getErrorMessage = (error: unknown) => {
+  const message = (error as { response?: { data?: { message?: unknown } } })?.response?.data?.message;
+  return typeof message === 'string' ? message : error instanceof Error ? error.message : 'Vui lòng thử lại.';
+};
 const elapsed = (createdAt?: string, now = Date.now()) => {
   if (!createdAt) return 'Mới nhận';
   const minutes = Math.max(0, Math.floor((now - new Date(createdAt).getTime()) / 60000));
@@ -17,11 +20,18 @@ const elapsed = (createdAt?: string, now = Date.now()) => {
 type Ticket = { order: KitchenOrder; item: KitchenItem };
 
 export default function KitchenDisplay() {
+  const [canReject] = useState(() => {
+    try { return (JSON.parse(localStorage.getItem('user') || '{}') as { role?: string }).role === 'kitchen'; }
+    catch { return false; }
+  });
   const [orders, setOrders] = useState<KitchenOrder[]>([]);
   const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
+  const [rejectTarget, setRejectTarget] = useState<Ticket | null>(null);
+  const [reason, setReason] = useState('');
+  const [rejectError, setRejectError] = useState<string | null>(null);
   const load = useSnapshotRefresh(
     orderApi.listForKitchen,
     (nextOrders) => { setOrders(nextOrders); setError(null); setLoading(false); },
@@ -47,6 +57,16 @@ export default function KitchenDisplay() {
     finally { setUpdatingItemId(null); }
   };
 
+  const reject = async () => {
+    if (!rejectTarget || updatingItemId || !reason.trim()) return;
+    setUpdatingItemId(rejectTarget.item.itemId); setRejectError(null);
+    try {
+      await orderApi.transitionItem(rejectTarget.order.orderId, rejectTarget.item.itemId, 'Rejected', reason.trim());
+      setRejectTarget(null); await load();
+    } catch (rejectFailure) { setRejectError(getErrorMessage(rejectFailure)); }
+    finally { setUpdatingItemId(null); }
+  };
+
   const TicketCard = ({ ticket, lane }: { ticket: Ticket; lane: 'Pending' | 'Preparing' }) => {
     const isUpdating = updatingItemId === ticket.item.itemId;
     const waiting = elapsed(ticket.order.createdAt, now);
@@ -58,6 +78,7 @@ export default function KitchenDisplay() {
       </div>
       <div className="p-4"><div className="flex items-start gap-3"><span className="tabular-nums grid h-11 min-w-11 place-items-center rounded-lg bg-slate-950 px-2 text-xl font-black text-white">{ticket.item.quantity}×</span><div className="min-w-0 flex-1"><p className="text-xl font-bold leading-7 text-slate-950">{ticket.item.dishName}</p>{ticket.item.note && <p className="overflow-wrap-anywhere mt-2 flex items-start gap-2 whitespace-pre-wrap rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-sm font-semibold leading-5 text-amber-950"><StickyNote aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" /><span>Ghi chú khách: {ticket.item.note}</span></p>}<OrderNoteMetadata analysis={ticket.item.aiNoteAnalysis} /></div></div>
         <button disabled={isUpdating} onClick={() => void transition(ticket, lane === 'Pending' ? 'Preparing' : 'Ready')} className={`${primaryButtonClass} mt-5 min-h-14 w-full text-base ${lane === 'Pending' ? 'bg-amber-600 hover:bg-amber-700' : 'bg-emerald-700 hover:bg-emerald-800'}`}>{isUpdating ? <><LoaderCircle aria-hidden="true" className="h-5 w-5 animate-spin" />Đang cập nhật…</> : lane === 'Pending' ? <><Flame aria-hidden="true" className="h-5 w-5" />Bắt đầu chế biến</> : <><BellRing aria-hidden="true" className="h-5 w-5" />Món đã sẵn sàng</>}</button>
+        {canReject && lane === 'Pending' && <button disabled={Boolean(updatingItemId)} onClick={() => { setRejectTarget(ticket); setReason(''); setRejectError(null); }} className={`${secondaryButtonClass} mt-2 w-full text-red-700`}>Từ chối</button>}
       </div>
     </article>;
   };
@@ -72,5 +93,13 @@ export default function KitchenDisplay() {
         <section aria-labelledby="preparing-title"><div className="mb-3 flex items-center justify-between"><h2 id="preparing-title" className="flex items-center gap-2 text-lg font-bold"><span className="h-3 w-3 rounded-full bg-blue-500" />Đang chế biến</h2><span className="tabular-nums text-sm font-semibold text-slate-500">{preparing.length} ticket</span></div><div className="grid gap-3 md:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">{preparing.length ? preparing.map((ticket) => <TicketCard key={ticket.item.itemId} ticket={ticket} lane="Preparing" />) : <EmptyState icon={ChefHat} title="Chưa có món đang chế biến" description="Bắt đầu một món mới từ hàng đợi bên cạnh." />}</div></section>
       </div>}
     </div>
+    <Modal open={Boolean(rejectTarget)} title="Từ chối món" description={rejectTarget ? `${rejectTarget.item.quantity}× ${rejectTarget.item.dishName} · Bàn ${rejectTarget.order.tableDisplayName}` : ''} size="sm" onClose={() => { if (!updatingItemId) setRejectTarget(null); }} footer={<><button type="button" disabled={Boolean(updatingItemId)} onClick={() => setRejectTarget(null)} className={secondaryButtonClass}>Quay lại</button><button type="submit" form="reject-item-form" disabled={Boolean(updatingItemId) || !reason.trim()} className={dangerButtonClass}>{updatingItemId ? 'Đang từ chối…' : 'Từ chối món'}</button></>}>
+      <form id="reject-item-form" onSubmit={(event) => { event.preventDefault(); void reject(); }} className="space-y-3">
+        <p className="text-sm text-slate-600">Món này sẽ không được tính tiền. Khách và phục vụ sẽ thấy lý do từ chối.</p>
+        <label className={labelClass} htmlFor="rejection-reason">Lý do từ chối (bắt buộc)</label>
+        <textarea id="rejection-reason" required maxLength={250} rows={3} value={reason} disabled={Boolean(updatingItemId)} onChange={(event) => setReason(event.target.value)} className={controlClass} placeholder="Ví dụ: Hết nguyên liệu" />
+        {rejectError && <Feedback tone="danger">{rejectError}</Feedback>}
+      </form>
+    </Modal>
   </main>;
 }

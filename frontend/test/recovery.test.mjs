@@ -71,6 +71,20 @@ beforeEach(() => {
 });
 
 describe('1. Customer reconnect and snapshot ordering', () => {
+  test('order rejection event refreshes customer reason and server-owned payable total', async (t) => {
+    const socket = new FakeSocket();
+    let current = { ...summary, payableTotal: 30000 };
+    axiosClient.defaults.adapter = async (config) => response(config, config.url.includes('/session') && !config.url.includes('session-summary') ? cart(1) : config.url === '/menu' ? menu : current);
+    const { recovery, seen } = customer(socket);
+    t.after(() => recovery.dispose());
+    await tick();
+    current = { ...summary, payableTotal: 10000, orders: [{ items: [{ status: 'Rejected', rejectionReason: 'Hết nguyên liệu' }] }] };
+    socket.receive('order:updated', { sessionId: scope.sessionId });
+    await tick();
+    assert.equal(seen.snapshots.at(-1)[1].payableTotal, 10000);
+    assert.equal(seen.snapshots.at(-1)[1].orders[0].items[0].rejectionReason, 'Hết nguyên liệu');
+    assert.equal(seen.errors.length, 0);
+  });
   test('cash close cancels pending reads and clears old credentials; a new QR session has no old payment scope', async (t) => {
     const { saveCustomerGrant } = await import('../src/services/customer-access.ts');
     saveCustomerGrant(cart(1));

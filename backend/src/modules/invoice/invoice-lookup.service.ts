@@ -24,6 +24,7 @@ import {
   invoiceFilename,
 } from '../vnpay/invoice-code';
 import { InvoiceDetailDto } from './dto/invoice.dto';
+import { billableSubtotal, itemCharge } from '../order/order-billing';
 
 @Injectable()
 export class InvoiceLookupService implements OnModuleInit {
@@ -84,14 +85,12 @@ export class InvoiceLookupService implements OnModuleInit {
         quantity: item.quantity,
         unitPrice: item.unitPrice,
         note: item.note,
+        status: item.status,
+        rejectionReason: item.rejectionReason,
+        chargedAmount: itemCharge(item),
       })),
       // Preserve the legacy subtotal fallback from immutable item snapshots.
-      subtotalAmount:
-        order.subtotalAmount ||
-        order.items.reduce(
-          (sum, item) => sum + item.unitPrice * item.quantity,
-          0,
-        ),
+      subtotalAmount: order.subtotalAmount || billableSubtotal(order.items),
       discountAmount:
         order.discountAmount ||
         Math.max(

@@ -9,6 +9,8 @@ export interface KitchenItem {
   status: string;
   note?: string;
   aiNoteAnalysis?: OrderNoteAnalysis;
+  rejectionReason?: string;
+  rejectedAt?: string;
 }
 
 export interface KitchenOrder {
@@ -24,6 +26,7 @@ export interface TablePaymentSummary {
   tableId: string;
   orderStatuses: string[];
   isPaid: boolean;
+  canClear?: boolean;
 }
 
 export const orderApi = {
@@ -35,8 +38,8 @@ export const orderApi = {
     const res = await axiosClient.get<KitchenOrder[]>('/orders/waiter', { signal, timeout: 10_000 });
     return res.data;
   },
-  transitionItem: async (orderId: string, itemId: string, status: string) => {
-    const res = await axiosClient.patch(`/orders/${orderId}/items/${itemId}/status`, { status });
+  transitionItem: async (orderId: string, itemId: string, status: string, rejectionReason?: string) => {
+    const res = await axiosClient.patch(`/orders/${orderId}/items/${itemId}/status`, { status, rejectionReason });
     return res.data;
   },
   listPaymentSummariesForWaiter: async (signal?: AbortSignal): Promise<TablePaymentSummary[]> => {

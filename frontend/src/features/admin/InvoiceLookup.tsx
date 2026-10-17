@@ -95,7 +95,8 @@ export function InvoiceRounds({ invoice }: { invoice: InvoiceDetail }) {
     <div className="mt-4 space-y-6">{invoice.orders.map((order) => <section key={order.sequence}>
       <h3 className="font-semibold text-slate-900">Lượt gọi món #{order.sequence}</h3>
       <ul className="mt-2 divide-y divide-slate-100">{order.items.map((item, index) => <li key={index} className="py-3 text-sm">
-        <div className="flex flex-wrap justify-between gap-2"><span className="min-w-0 break-words font-medium">{item.name} × {item.quantity}</span><span className="shrink-0 font-semibold">{money(item.unitPrice * item.quantity)}</span></div>
+        <div className="flex flex-wrap justify-between gap-2"><span className="min-w-0 break-words font-medium">{item.name} × {item.quantity}</span><span className="shrink-0 font-semibold">{money(item.status === 'Rejected' ? 0 : item.unitPrice * item.quantity)}</span></div>
+        {item.status === 'Rejected' && <div className="mt-1 text-red-800"><p className="font-semibold">Bếp từ chối · Không tính tiền · Giá trị gốc: {money(item.unitPrice * item.quantity)}</p><p className="whitespace-pre-wrap break-words">Lý do: {item.rejectionReason}</p></div>}
         <p className="mt-1 text-slate-600">Đơn giá: {money(item.unitPrice)}</p>
         {item.note && <p className="mt-1 break-words text-slate-600">Ghi chú: {item.note}</p>}
       </li>)}</ul>

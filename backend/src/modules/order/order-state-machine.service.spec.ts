@@ -318,7 +318,9 @@ describe('OrderStateMachineService', () => {
         sessionId,
         status: { $in: [OrderStatus.SERVED] },
         items: {
-          $not: { $elemMatch: { status: { $ne: OrderStatus.SERVED } } },
+          $not: {
+            $elemMatch: { status: { $nin: [OrderStatus.SERVED, 'Rejected'] } },
+          },
         },
       },
       expect.objectContaining({

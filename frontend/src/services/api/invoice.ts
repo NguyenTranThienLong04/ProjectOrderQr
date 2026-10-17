@@ -13,7 +13,7 @@ export interface InvoiceDetail {
   vnpTransactionNo?: string;
   orders: {
     sequence: number;
-    items: { name: string; nameEn?: string; quantity: number; unitPrice: number; note?: string }[];
+    items: { name: string; nameEn?: string; quantity: number; unitPrice: number; note?: string; status?: string; rejectionReason?: string; chargedAmount?: number }[];
     subtotalAmount: number;
     discountAmount: number;
     totalAmount: number;

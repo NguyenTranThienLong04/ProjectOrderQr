@@ -4,7 +4,10 @@ import { Model, PipelineStage } from 'mongoose';
 import { Order, OrderDocument } from '../order/order.schema';
 import { Table, TableDocument } from '../table/table.schema';
 import { Dish, DishDocument } from '../dish/dish.schema';
-import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  OrderStatus,
+  REJECTED_ITEM_STATUS,
+} from '../../common/enums/order-status.enum';
 import { TableStatus } from '../../common/enums/table-status.enum';
 import { Review, ReviewDocument } from '../review/review.schema';
 
@@ -162,6 +165,7 @@ export class AdminService {
     const pipeline: PipelineStage[] = [
       { $match: match },
       { $unwind: '$items' },
+      { $match: { 'items.status': { $ne: REJECTED_ITEM_STATUS } } },
       {
         $group: {
           _id: '$items.dishId',

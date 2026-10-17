@@ -1,7 +1,10 @@
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
 import { ActorType } from '../enums/actor-type.enum';
-import { OrderStatus } from '../enums/order-status.enum';
+import {
+  ORDER_ITEM_STATUSES,
+  type OrderItemStatus,
+} from '../enums/order-status.enum';
 import { UserRole } from '../enums/user-role.enum';
 
 @Schema({ _id: false })
@@ -24,11 +27,11 @@ export const StatusChangedBySchema =
 
 @Schema({ _id: false })
 export class StatusHistoryEntry {
-  @Prop({ enum: OrderStatus, type: String, default: null })
-  fromStatus!: OrderStatus | null;
+  @Prop({ enum: ORDER_ITEM_STATUSES, type: String, default: null })
+  fromStatus!: OrderItemStatus | null;
 
-  @Prop({ required: true, enum: OrderStatus, type: String })
-  toStatus!: OrderStatus;
+  @Prop({ required: true, enum: ORDER_ITEM_STATUSES, type: String })
+  toStatus!: OrderItemStatus;
 
   @Prop({ type: StatusChangedBySchema, required: true })
   changedBy!: StatusChangedBy;

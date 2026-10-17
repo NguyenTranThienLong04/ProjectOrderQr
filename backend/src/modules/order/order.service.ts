@@ -8,7 +8,10 @@ import {
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { ActorType } from '../../common/enums/actor-type.enum';
-import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  OrderStatus,
+  REJECTED_ITEM_STATUS,
+} from '../../common/enums/order-status.enum';
 import { TableStatus } from '../../common/enums/table-status.enum';
 import { Dish, DishDocument } from '../dish/dish.schema';
 import { SessionService } from '../session/session.service';
@@ -143,6 +146,7 @@ export class OrderService implements OnModuleInit {
             subtotalAmount,
             discountAmount: appliedPromotion.discountAmount,
             promotionCode: appliedPromotion.code,
+            promotionSnapshot: appliedPromotion.snapshot,
             totalAmount: appliedPromotion.totalAmount,
             note: createOrderDto.note?.trim(),
           }).save({ session: mongoSession });
@@ -241,10 +245,22 @@ export class OrderService implements OnModuleInit {
 
   /** Returns orders (with filtered items) relevant for Waiter UI */
   async listForWaiter() {
+    const activeSessions = await this.sessionModel
+      .find({ status: SessionStatus.ACTIVE })
+      .select('_id')
+      .exec();
     const docs = await this.orderModel
       .find({
-        status: { $in: PROCESSING_ORDER_STATUSES },
-        'items.status': OrderStatus.READY,
+        $or: [
+          {
+            status: { $in: PROCESSING_ORDER_STATUSES },
+            'items.status': OrderStatus.READY,
+          },
+          {
+            sessionId: { $in: activeSessions.map((session) => session._id) },
+            'items.status': REJECTED_ITEM_STATUS,
+          },
+        ],
       })
       .sort({ createdAt: 1 })
       .exec();
@@ -259,7 +275,12 @@ export class OrderService implements OnModuleInit {
         tableCodes.get(order.tableId.toString()) ??
         'Không rõ',
       items: order.items
-        .filter((it) => it.status === OrderStatus.READY)
+        .filter(
+          (it) =>
+            it.status === REJECTED_ITEM_STATUS ||
+            (PROCESSING_ORDER_STATUSES.includes(order.status) &&
+              it.status === OrderStatus.READY),
+        )
         .map((it) => ({
           itemId: it._id.toString(),
           dishName: it.dishName,
@@ -267,6 +288,8 @@ export class OrderService implements OnModuleInit {
           note: it.note,
           aiNoteAnalysis: it.aiNoteAnalysis,
           status: it.status,
+          rejectionReason: it.rejectionReason,
+          rejectedAt: it.rejectedAt,
         })),
       createdAt: this.getCreatedAt(order),
     }));
@@ -319,7 +342,6 @@ export class OrderService implements OnModuleInit {
     const orders = await this.orderModel
       .find({
         sessionId: { $in: sessions.map((session) => session._id) },
-        status: { $ne: OrderStatus.CANCELLED },
       })
       .select('sessionId status')
       .exec();
@@ -340,7 +362,16 @@ export class OrderService implements OnModuleInit {
       return tableIds.map((tableId) => ({
         tableId: tableId.toString(),
         orderStatuses,
-        isPaid: orderStatuses.every((status) => status === OrderStatus.PAID),
+        isPaid:
+          orderStatuses.includes(OrderStatus.PAID) &&
+          orderStatuses.every(
+            (status) =>
+              status === OrderStatus.PAID || status === OrderStatus.CANCELLED,
+          ),
+        canClear: orderStatuses.every(
+          (status) =>
+            status === OrderStatus.PAID || status === OrderStatus.CANCELLED,
+        ),
       }));
     });
   }

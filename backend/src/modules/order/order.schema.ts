@@ -4,7 +4,12 @@ import {
 } from '../../common/schemas/order-note-analysis.schema';
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { HydratedDocument, Types } from 'mongoose';
-import { OrderStatus } from '../../common/enums/order-status.enum';
+import {
+  OrderStatus,
+  type OrderItemStatus,
+  ORDER_ITEM_STATUSES,
+} from '../../common/enums/order-status.enum';
+import { PromotionType } from '../promotion/promotion-type.enum';
 import {
   StatusHistoryEntry,
   StatusHistoryEntrySchema,
@@ -12,6 +17,21 @@ import {
 
 export type OrderItemDocument = HydratedDocument<OrderItem>;
 export type OrderDocument = HydratedDocument<Order>;
+
+@Schema({ _id: false })
+export class OrderPromotionSnapshot {
+  @Prop({ type: String, enum: PromotionType, required: true })
+  type!: PromotionType;
+
+  @Prop({ required: true, min: 0 })
+  value!: number;
+
+  @Prop({ required: true, min: 0 })
+  minOrderAmount!: number;
+}
+const OrderPromotionSnapshotSchema = SchemaFactory.createForClass(
+  OrderPromotionSnapshot,
+);
 
 @Schema({ _id: true, timestamps: false })
 export class OrderItem {
@@ -43,11 +63,20 @@ export class OrderItem {
 
   @Prop({
     required: true,
-    enum: OrderStatus,
+    enum: ORDER_ITEM_STATUSES,
     type: String,
     default: OrderStatus.PENDING,
   })
-  status!: OrderStatus;
+  status!: OrderItemStatus;
+
+  @Prop({ trim: true, minlength: 1, maxlength: 250 })
+  rejectionReason?: string;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  rejectedBy?: Types.ObjectId;
+
+  @Prop({ type: Date })
+  rejectedAt?: Date;
 
   @Prop({ type: [StatusHistoryEntrySchema], default: [] })
   statusHistory!: StatusHistoryEntry[];
@@ -90,12 +119,15 @@ export class Order {
   @Prop({ required: true, min: 0, default: 0 })
   subtotalAmount!: number;
 
-  /** Immutable discount snapshot; payment, invoices, and reports never recalculate a promotion. */
+  /** Revised only by guarded item rejection before checkout; settlement reads this snapshot. */
   @Prop({ required: true, min: 0, default: 0 })
   discountAmount!: number;
 
   @Prop({ trim: true, uppercase: true })
   promotionCode?: string;
+
+  @Prop({ type: OrderPromotionSnapshotSchema, default: undefined })
+  promotionSnapshot?: OrderPromotionSnapshot;
 
   @Prop({ trim: true })
   note?: string;

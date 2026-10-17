@@ -22,6 +22,8 @@ import { InvoiceLookupService } from '../invoice/invoice-lookup.service';
 import { ensureInvoiceCode, withInvoiceCodeRetry } from './invoice-code';
 import { Order, OrderDocument } from '../order/order.schema';
 import { OrderStateMachineService } from '../order/order-state-machine.service';
+import { billableSubtotal } from '../order/order-billing';
+import { isFinishedItem } from '../order/order-transition.rules';
 import { Session, SessionDocument } from '../session/session.schema';
 import { Table, TableDocument } from '../table/table.schema';
 import {
@@ -46,6 +48,9 @@ interface SessionOrderSummary {
     unitPrice: number;
     quantity: number;
     note?: string;
+    status?: string;
+    rejectionReason?: string;
+    rejectedAt?: Date;
   }[];
   subtotalAmount: number;
   discountAmount: number;
@@ -256,10 +261,7 @@ export class VnpayService implements OnModuleInit {
   private subtotalSnapshot(order: OrderDocument): number {
     if (Number.isSafeInteger(order.subtotalAmount) && order.subtotalAmount > 0)
       return order.subtotalAmount;
-    return order.items.reduce(
-      (sum, item) => sum + item.unitPrice * item.quantity,
-      0,
-    );
+    return billableSubtotal(order.items);
   }
 
   private summarizeOrder(
@@ -283,6 +285,9 @@ export class VnpayService implements OnModuleInit {
         unitPrice: item.unitPrice,
         quantity: item.quantity,
         note: item.note,
+        status: item.status,
+        rejectionReason: item.rejectionReason,
+        rejectedAt: item.rejectedAt,
       })),
       subtotalAmount,
       discountAmount,
@@ -324,7 +329,7 @@ export class VnpayService implements OnModuleInit {
       payableDocuments.every(
         (order) =>
           order.status === OrderStatus.SERVED &&
-          order.items.every((item) => item.status === OrderStatus.SERVED),
+          order.items.every((item) => isFinishedItem(item.status)),
       );
     const nonCancelledOrders = orderDocuments.filter(
       (order) => order.status !== OrderStatus.CANCELLED,
@@ -359,7 +364,7 @@ export class VnpayService implements OnModuleInit {
         (sum, order) => sum + order.discountAmount,
         0,
       ),
-      // Payment authority is always the immutable Order.totalAmount snapshot.
+      // Payment authority is the Order.totalAmount snapshot, revised atomically on rejection.
       payableTotal: payableOrders.reduce(
         (sum, order) => sum + order.totalAmount,
         0,
@@ -674,6 +679,18 @@ export class VnpayService implements OnModuleInit {
             }
             if (!billing.summary.canPay)
               throw new BadRequestException(billing.summary.eligibilityMessage);
+            // Serialize checkout creation with item rejection and session lifecycle writes.
+            const sessionClaim = await this.sessionModel
+              .updateOne(
+                { _id: billing.session._id, status: SessionStatus.ACTIVE },
+                { $inc: { __v: 1 } },
+                { session: mongoSession },
+              )
+              .exec();
+            if (sessionClaim.modifiedCount !== 1)
+              throw new ConflictException(
+                'Phiên ăn vừa thay đổi, vui lòng tải lại',
+              );
             const amount = billing.summary.payableTotal;
             if (
               !Number.isSafeInteger(amount * 100) ||

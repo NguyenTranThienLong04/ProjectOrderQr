@@ -11,6 +11,10 @@ import { SessionModule } from '../session/session.module';
 import { GatewayModule } from '../../gateway/gateway.module';
 import { PromotionModule } from '../promotion/promotion.module';
 import { InvoiceModule } from '../invoice/invoice.module';
+import {
+  PaymentIntent,
+  PaymentIntentSchema,
+} from '../vnpay/payment-intent.schema';
 
 @Module({
   imports: [
@@ -23,6 +27,7 @@ import { InvoiceModule } from '../invoice/invoice.module';
       { name: Table.name, schema: TableSchema },
       { name: Session.name, schema: SessionSchema },
       { name: Dish.name, schema: DishSchema },
+      { name: PaymentIntent.name, schema: PaymentIntentSchema },
     ]),
   ],
   controllers: [OrderController],

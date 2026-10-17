@@ -185,6 +185,13 @@ describe(
       expect(gateway.emit).not.toHaveBeenCalled();
       failure.mockRestore();
       await first.controller.create(dto);
+      expect(
+        (await second.orders.findOne().orFail()).promotionSnapshot,
+      ).toMatchObject({
+        type: PromotionType.PERCENTAGE,
+        value: 10,
+        minOrderAmount: 0,
+      });
       expect(gateway.emitOrderUpdated).toHaveBeenCalledTimes(1);
       expect(gateway.emit).toHaveBeenCalledTimes(1);
     });

@@ -79,6 +79,45 @@ describe('InvoiceService PDF content', () => {
       'Mã VNPAY',
     );
   });
+  it('prints rejected item, original value and reason as excluded from the charge in both PDF paths', async () => {
+    const text = jest.spyOn(PDFDocument.prototype, 'text');
+    const rejected = {
+      name: 'Món hết',
+      unitPrice: 20000,
+      quantity: 2,
+      status: 'Rejected',
+      rejectionReason: 'Hết nguyên liệu',
+    };
+    await new InvoiceService().renderDetail({
+      ...invoice,
+      orders: [
+        {
+          sequence: 1,
+          items: [rejected],
+          subtotalAmount: 0,
+          discountAmount: 0,
+          totalAmount: 0,
+        },
+      ],
+      subtotalAmount: 0,
+      discountAmount: 0,
+      totalAmount: 0,
+    });
+    let visible = text.mock.calls.map((call) => call[0]).join('\n');
+    expect(visible).toContain('Không tính tiền (giá trị gốc: 40.000');
+    expect(visible).toContain('Hết nguyên liệu');
+    expect(visible).toMatch(/Tổng thanh toán: 0/);
+    text.mockClear();
+    await new InvoiceService().render({
+      items: [{ ...rejected, dishName: rejected.name }],
+      subtotalAmount: 0,
+      discountAmount: 0,
+      totalAmount: 0,
+    } as OrderDocument);
+    visible = text.mock.calls.map((call) => call[0]).join('\n');
+    expect(visible).toContain('Không tính tiền');
+    expect(visible).toMatch(/Tạm tính: 0/);
+  });
   it('keeps pre-PaymentIntent Order PDFs readable without Mongo IDs', async () => {
     const text = jest.spyOn(PDFDocument.prototype, 'text');
     const order = {

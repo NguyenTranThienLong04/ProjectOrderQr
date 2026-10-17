@@ -43,7 +43,7 @@ export class OrderController {
     // Ownership follows the merged Session while tableId remains the physical
     // source-table audit reference. Every customer in that Session gets the event.
     await this.appGateway.emitOrderUpdated(result);
-    this.appGateway.emit(['waiter', 'admin'], 'tables:updated');
+    await this.appGateway.emit(['waiter', 'admin'], 'tables:updated');
     return result;
   }
 
@@ -109,9 +109,10 @@ export class OrderController {
       itemId,
       body.status,
       req.user,
+      body.rejectionReason,
     );
     await this.appGateway.emitOrderUpdated(order);
-    this.appGateway.emit(['waiter', 'admin'], 'tables:updated');
+    await this.appGateway.emit(['waiter', 'admin'], 'tables:updated');
     return order;
   }
 

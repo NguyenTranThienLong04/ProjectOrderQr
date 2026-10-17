@@ -2,6 +2,9 @@ import { axiosClient } from './axios-client';
 import { downloadInvoiceBlob } from './invoice-download';
 
 export interface SessionPaymentOrderItem {
+  status?: string;
+  rejectionReason?: string;
+  rejectedAt?: string;
   dishName: string;
   nameEn?: string;
   imageUrl?: string;

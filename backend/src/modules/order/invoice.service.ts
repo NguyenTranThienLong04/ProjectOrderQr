@@ -3,6 +3,8 @@ import PDFDocument from 'pdfkit';
 import { join } from 'path';
 import { OrderDocument } from './order.schema';
 import type { InvoiceDetailDto } from '../invoice/dto/invoice.dto';
+import { billableSubtotal, itemCharge } from './order-billing';
+import { REJECTED_ITEM_STATUS } from '../../common/enums/order-status.enum';
 
 const fontPath = join(__dirname, '../../../assets/fonts/NotoSans-Regular.ttf');
 const currency = new Intl.NumberFormat('vi-VN', {
@@ -39,7 +41,7 @@ export class InvoiceService {
     document.fontSize(12).text('Danh sách món', { underline: true });
     document.moveDown(0.5);
     for (const item of order.items) {
-      const lineTotal = item.unitPrice * item.quantity;
+      const lineTotal = itemCharge(item);
       document
         .fontSize(10)
         .text(`${item.dishName} × ${item.quantity}`, { continued: true });
@@ -49,14 +51,15 @@ export class InvoiceService {
         .fontSize(9)
         .text(`Đơn giá: ${currency.format(item.unitPrice)}`);
       document.fillColor('#000000');
+      if (item.status === REJECTED_ITEM_STATUS)
+        document.text(
+          `Từ chối — Không tính tiền (giá trị gốc: ${currency.format(item.unitPrice * item.quantity)}). Lý do: ${item.rejectionReason ?? ''}`,
+        );
       if (item.note) document.text(`Ghi chú: ${item.note}`);
     }
 
     document.moveDown();
-    const itemsSubtotal = order.items.reduce(
-      (total, item) => total + item.unitPrice * item.quantity,
-      0,
-    );
+    const itemsSubtotal = billableSubtotal(order.items);
     // Orders created before Phase 12 do not have a subtotal snapshot; derive it from their immutable item snapshots.
     const subtotalAmount = order.subtotalAmount || itemsSubtotal;
     document
@@ -122,11 +125,15 @@ export class InvoiceService {
         });
       document.moveDown(0.4);
       for (const item of order.items) {
-        const lineTotal = item.unitPrice * item.quantity;
+        const lineTotal = itemCharge(item);
         document
           .fontSize(10)
           .text(`${item.name} × ${item.quantity}`, { continued: true });
         document.text(currency.format(lineTotal), { align: 'right' });
+        if (item.status === REJECTED_ITEM_STATUS)
+          document.text(
+            `Từ chối — Không tính tiền (giá trị gốc: ${currency.format(item.unitPrice * item.quantity)}). Lý do: ${item.rejectionReason ?? ''}`,
+          );
         if (item.note) {
           document
             .fillColor('#555555')

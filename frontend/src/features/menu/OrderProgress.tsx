@@ -42,6 +42,7 @@ export function OrderProgress({ orders, lang }: { orders: SessionPaymentOrder[];
                     <div className="min-w-0 flex-1">
                       <p className="overflow-wrap-anywhere text-sm font-semibold leading-5 text-stone-900">{name}</p>
                       <p className="mt-0.5 text-xs tabular-nums leading-5 text-stone-600">x{item.quantity} · {currency.format(item.unitPrice)}</p>
+                      {item.status === 'Rejected' && <div className="mt-1 space-y-1 text-sm text-red-800"><StatusBadge status="Rejected" label={english ? 'Rejected by kitchen' : undefined} /><p className="overflow-wrap-anywhere whitespace-pre-wrap">{item.rejectionReason}</p><p className="font-semibold">{english ? 'Not charged' : 'Không tính tiền'}</p></div>}
                       {item.note?.trim() && <p className="overflow-wrap-anywhere mt-0.5 line-clamp-2 text-xs leading-5 text-amber-800" title={item.note}>{english ? 'Note' : 'Ghi chú'}: {item.note}</p>}
                     </div>
                   </li>
