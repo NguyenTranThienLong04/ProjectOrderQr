@@ -2,7 +2,6 @@ import { testMongoUri, testDatabaseName } from './support/test-database';
 
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -12,7 +11,10 @@ import { Test } from '@nestjs/testing';
 import { Connection, Model, Types } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
-import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
+import { AuthModule } from '../src/modules/auth/auth.module';
+import { SessionModule } from '../src/modules/session/session.module';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixtures, createCustomerFixture } from './support/e2e-auth';
 import { ReviewIntelligenceModule } from '../src/modules/ai/review-intelligence/review-intelligence.module';
 import { AdminModule } from '../src/modules/admin/admin.module';
 import { AI_PROVIDER } from '../src/modules/ai/providers/ai-provider.interface';
@@ -40,10 +42,11 @@ const sourcesBody = (response: { body: unknown }) =>
 
 describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider', () => {
   const dbName = testDatabaseName();
-  const secret = 'phase22-test-only',
-    jwt = new JwtService({ secret });
+  const secret = 'phase22-test-only';
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
+  let customer: Awaited<ReturnType<typeof createCustomerFixture>>;
   const auth = (role = 'admin') =>
-    `Bearer ${jwt.sign({ sub: 'fixture', email: 'fixture@example.invalid', role })}`;
+    `Bearer ${role === 'customer' ? customer.customerToken : staff.token(role as UserRole)}`;
   const steps: MockAiStep[] = [],
     provider = new MockAiProvider(steps);
   const ids = Array.from({ length: 25 }, () => new Types.ObjectId());
@@ -75,7 +78,7 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
       .mockRejectedValue(new Error('Live provider forbidden'));
     const fixture = await Test.createTestingModule({
       imports: [
-        ConfigModule,
+        ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
         MongooseModule.forRoot(testMongoUri(), {
           dbName,
           retryAttempts: 0,
@@ -83,8 +86,9 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
         }),
         ReviewIntelligenceModule,
         AdminModule,
+        AuthModule,
+        SessionModule,
       ],
-      providers: [JwtStrategy],
     })
       .overrideProvider(ConfigService)
       .useValue(
@@ -106,6 +110,8 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
       }),
     );
     await app.init();
+    staff = await createStaffFixtures(app, Object.values(UserRole));
+    customer = await createCustomerFixture(app);
     connection = fixture.get(getConnectionToken());
     expect(connection.name).toBe(dbName);
     reviews = fixture.get(getModelToken(Review.name));
@@ -187,6 +193,8 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
         });
         await orders?.deleteMany({ _id: { $in: orderIds } });
         await dishes?.deleteOne({ _id: dish._id });
+        await staff?.cleanup();
+        await customer?.cleanup();
         const entries = await audit
           ?.find({
             feature: { $in: ['review-classification', 'review-summary'] },
@@ -212,7 +220,7 @@ describe('Phase 22 real Mongo/HTTP; isolated synthetic reviews and mock provider
         await request(app.getHttpServer())
           .get(`/ai/admin/review-insights${suffix}`)
           .set('Authorization', auth(role))
-          .expect(403);
+          .expect(role === 'customer' ? 401 : 403);
     }
     for (const suffix of ['analyze', 'summary']) {
       await request(app.getHttpServer())

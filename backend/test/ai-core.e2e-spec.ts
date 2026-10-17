@@ -28,6 +28,8 @@ import {
   validAiEnv,
 } from '../src/modules/ai/testing/ai-test.fixture';
 import { Table } from '../src/modules/table/table.schema';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixtures } from './support/e2e-auth';
 
 jest.setTimeout(60000);
 @Module({})
@@ -39,6 +41,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
   let tables: Model<Table>;
   let audits: Model<AiInteraction>;
   let service: AiOrchestratorService;
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
   const tableId = new Types.ObjectId();
   const dbName = testDatabaseName();
   const config = new ConfigService({
@@ -75,6 +78,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
       .mockResolvedValue(undefined);
     app = fixture.createNestApplication<INestApplication<App>>();
     await app.listen(0, '127.0.0.1');
+    staff = await createStaffFixtures(app, [UserRole.WAITER]);
     connection = fixture.get(getConnectionToken());
     expect(connection.name).toBe(dbName);
     tables = fixture.get(getModelToken(Table.name));
@@ -91,6 +95,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
   afterAll(async () => {
     try {
       if (tables) await tables.deleteOne({ _id: tableId });
+      await staff?.cleanup();
       if (audits) {
         const entries = await audits
           .find({ feature: foundationPrompt.feature })
@@ -142,6 +147,7 @@ describe('Phase 17 AppModule core isolation (real Mongo/HTTP/Socket)', () => {
       transports: ['websocket'],
       reconnection: false,
       timeout: 3000,
+      auth: { token: staff.token(UserRole.WAITER) },
     });
     try {
       await new Promise<void>((resolve, reject) => {

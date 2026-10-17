@@ -58,6 +58,6 @@ jobs:
       - name: MongoDB transaction and concurrency regressions
         working-directory: backend
         run: npm run test:integration
-      - name: Isolated E2E smoke and persistence tests
+      - name: Full isolated E2E suite
         working-directory: backend
         run: npm run test:e2e:ci

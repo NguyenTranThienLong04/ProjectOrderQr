@@ -4,10 +4,13 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Model, Types } from 'mongoose';
 import request from 'supertest';
 import { io, Socket } from 'socket.io-client';
+import { randomUUID } from 'node:crypto';
 import { AppModule } from '../src/app.module';
 import { OrderStatus } from '../src/common/enums/order-status.enum';
 import { SessionStatus } from '../src/common/enums/session-status.enum';
 import { TableStatus } from '../src/common/enums/table-status.enum';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixture, scanTableFixture } from './support/e2e-auth';
 import { Dish, DishDocument } from '../src/modules/dish/dish.schema';
 import { Order, OrderDocument } from '../src/modules/order/order.schema';
 import { AbandonedSessionCleanupService } from '../src/modules/session/abandoned-session-cleanup.service';
@@ -40,6 +43,7 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
   let cleanupService: AbandonedSessionCleanupService;
   let sessionService: SessionService;
   let dish: DishDocument;
+  const staffTokens = new Map<string, string>();
   const tableIds: Types.ObjectId[] = [];
   const sessionIds: Types.ObjectId[] = [];
   const orderIds: Types.ObjectId[] = [];
@@ -106,16 +110,33 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
   };
 
   const connectToRoom = async (room: 'waiter' | 'admin') => {
-    const socket = io(baseUrl, { transports: ['websocket'], forceNew: true });
-    await new Promise<void>((resolve, reject) => {
-      socket.once('connect', () => resolve());
-      socket.once('connect_error', reject);
+    const socket = io(baseUrl, {
+      transports: ['websocket'],
+      forceNew: true,
+      reconnection: false,
+      auth: { token: staffTokens.get(room) },
     });
-    await new Promise<void>((resolve) => {
-      socket.once('joined', () => resolve());
-      socket.emit('join', { room });
-    });
-    return socket;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once('connect', () => resolve());
+        socket.once('connect_error', reject);
+      });
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('Room join timed out')),
+          5000,
+        );
+        socket.once('joined', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        socket.emit('join', { room });
+      });
+      return socket;
+    } catch (error) {
+      socket.disconnect();
+      throw error;
+    }
   };
 
   beforeAll(async () => {
@@ -140,6 +161,10 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
     paymentIntentModel = moduleFixture.get(getModelToken(PaymentIntent.name));
     cleanupService = moduleFixture.get(AbandonedSessionCleanupService);
     sessionService = moduleFixture.get(SessionService);
+    for (const role of [UserRole.WAITER, UserRole.ADMIN]) {
+      const staff = await createStaffFixture(app, role);
+      staffTokens.set(role, staff.accessToken);
+    }
     dish = await dishModel.create({
       name: `__abandonment_dish_${Date.now()}__`,
       price: 30_000,
@@ -157,11 +182,8 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
       currentSessionId: null,
     });
     tableIds.push(table._id);
-    const firstScan = await request(app.getHttpServer())
-      .get('/sessions/active')
-      .query({ tableId: table.id })
-      .expect(200);
-    const firstSessionId = new Types.ObjectId(firstScan.body.sessionId);
+    const firstScan = await scanTableFixture(app, table.id);
+    const firstSessionId = new Types.ObjectId(firstScan.sessionId);
     sessionIds.push(firstSessionId);
     expect((await tableModel.findById(table._id).exec())?.status).toBe(
       TableStatus.OCCUPIED,
@@ -199,13 +221,14 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
     expect(releasedTable?.status).toBe(TableStatus.AVAILABLE);
     expect(releasedTable?.currentSessionId).toBeNull();
 
-    const secondScan = await request(app.getHttpServer())
-      .get('/sessions/active')
-      .query({ tableId: table.id })
-      .expect(200);
-    sessionIds.push(new Types.ObjectId(secondScan.body.sessionId));
-    expect(secondScan.body.sessionId).not.toBe(firstSessionId.toString());
-    expect(secondScan.body.cart).toEqual([]);
+    const secondScan = await scanTableFixture(
+      app,
+      table.id,
+      firstScan.customerToken,
+    );
+    sessionIds.push(new Types.ObjectId(secondScan.sessionId));
+    expect(secondScan.sessionId).not.toBe(firstSessionId.toString());
+    expect(secondScan.cart).toEqual([]);
   });
 
   it('shared-cart activity from either tab extends timeout, then an abandoned non-empty cart expires', async () => {
@@ -322,7 +345,12 @@ describe('Abandoned zero-Order Session lifecycle (real MongoDB + Socket.io)', ()
       cleanupService.cleanupAbandonedSessions(),
       request(app.getHttpServer())
         .post('/orders')
-        .send({ tableId: orderRace.table.id })
+        .send({
+          tableId: orderRace.table.id,
+          sessionId: orderRace.session.id,
+          cartVersion: orderRace.session.version,
+          idempotencyKey: randomUUID(),
+        })
         .expect(201),
     ]);
     const orderRaceAfter = await sessionModel

@@ -1,7 +1,6 @@
 import { testMongoUri, testDatabaseName } from './support/test-database';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -9,6 +8,7 @@ import {
 } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
 import { Connection, Model, Types } from 'mongoose';
+import crypto from 'node:crypto';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { VnpayModule } from '../src/modules/vnpay/vnpay.module';
@@ -31,7 +31,10 @@ import {
 import { Table, TableDocument } from '../src/modules/table/table.schema';
 import { OrderStatus } from '../src/common/enums/order-status.enum';
 import { TableStatus } from '../src/common/enums/table-status.enum';
-import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
+import { AuthModule } from '../src/modules/auth/auth.module';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixture, scanTableFixture } from './support/e2e-auth';
+import { signedIpnFixture } from './support/vnpay-ipn';
 import { AbandonedSessionCleanupService } from '../src/modules/session/abandoned-session-cleanup.service';
 import { InvoiceDetailDto } from '../src/modules/invoice/dto/invoice.dto';
 
@@ -40,7 +43,7 @@ jest.setTimeout(60000);
 describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
   const dbName = testDatabaseName();
   const secret = 'invoice-integration-only';
-  const jwt = new JwtService({ secret });
+  const tokens = new Map<string, string>();
   let app: INestApplication<App>, connection: Connection;
   let intents: Model<PaymentIntentDocument>,
     orders: Model<OrderDocument>,
@@ -50,26 +53,22 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
     table: TableDocument,
     session: SessionDocument,
     covered: OrderDocument[];
-  const auth = (role = 'admin') =>
-    `Bearer ${jwt.sign({ sub: 'fixture', email: 'fixture@example.invalid', role })}`;
+  const auth = (role = 'admin') => `Bearer ${tokens.get(role)}`;
   const get = (code: string, suffix = '') =>
     request(app.getHttpServer())
       .get(`/admin/invoices/${encodeURIComponent(code)}${suffix}`)
       .set('Authorization', auth());
   const checkout = () =>
     vnpay.createPaymentUrl(session.id, table.id, '127.0.0.1');
-  const signedIpn = (intent: PaymentIntentDocument) => {
-    const params: Record<string, string> = {
-      vnp_TxnRef: intent.txnRef,
-      vnp_Amount: String(intent.amount * 100),
-      vnp_ResponseCode: '00',
-      vnp_TransactionNo: '123456789',
-    };
-    params.vnp_SecureHash = (
-      vnpay as unknown as { sign: (params: Record<string, string>) => string }
-    ).sign(params);
-    return params;
-  };
+  const signedIpn = (
+    intent: PaymentIntentDocument,
+    outcome: 'success' | 'cancelled' = 'success',
+  ) =>
+    signedIpnFixture(
+      intent,
+      { merchantCode: 'TEST', hashSecret: secret },
+      outcome,
+    );
   const paidIntent = async () => {
     const result = await checkout();
     const intent = await intents
@@ -92,9 +91,9 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,
         }),
+        AuthModule,
         VnpayModule,
       ],
-      providers: [JwtStrategy],
     })
       .overrideProvider(ConfigService)
       .useValue(
@@ -126,6 +125,10 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
     tables = fixture.get(getModelToken(Table.name));
     vnpay = fixture.get(VnpayService);
     await intents.init();
+    for (const role of Object.values(UserRole)) {
+      const staff = await createStaffFixture(app, role);
+      tokens.set(role, staff.accessToken);
+    }
   });
 
   beforeEach(async () => {
@@ -142,6 +145,9 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
       { _id: table._id },
       { $set: { currentSessionId: session._id } },
     );
+    const customer = await scanTableFixture(app, table.id);
+    expect(customer.sessionId).toBe(session.id);
+    tokens.set('customer', customer.customerToken);
     covered = [];
     for (const [price, discount] of [
       [100000, 0],
@@ -208,7 +214,7 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
 
   it('real invoice index collision is regenerated; 5 repeated collisions become controlled 503', async () => {
     const code = generateInvoiceCode().slice(0, 13) + 'AAAAAAAA';
-    await intents.create({
+    const collision = await intents.create({
       invoiceCode: code,
       txnRef: crypto.randomUUID(),
       coverageKey: crypto.randomUUID(),
@@ -217,8 +223,13 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
       amount: 1,
       paymentUrl: 'test',
       expiresAt: new Date(),
-      status: PaymentIntentStatus.FAILED,
+      status: PaymentIntentStatus.PENDING,
     });
+    await request(app.getHttpServer())
+      .get('/vnpay/ipn')
+      .query(signedIpn(collision, 'cancelled'))
+      .expect(200)
+      .expect({ RspCode: '00', Message: 'Confirm Success' });
     const random = jest.spyOn(
       crypto,
       'randomInt',
@@ -228,10 +239,14 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
     expect(
       (await intents.findOne({ txnRef: result.txnRef }))?.invoiceCode,
     ).not.toBe(code);
-    await intents.updateOne(
-      { txnRef: result.txnRef },
-      { $set: { status: PaymentIntentStatus.FAILED } },
-    );
+    const retryIntent = await intents
+      .findOne({ txnRef: result.txnRef })
+      .orFail();
+    await request(app.getHttpServer())
+      .get('/vnpay/ipn')
+      .query(signedIpn(retryIntent, 'cancelled'))
+      .expect(200)
+      .expect({ RspCode: '00', Message: 'Confirm Success' });
     random.mockClear().mockReturnValue(0);
     await expect(checkout()).rejects.toMatchObject({ status: 503 });
     expect(random).toHaveBeenCalledTimes(40);
@@ -310,7 +325,8 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
         await request(app.getHttpServer())
           .get(`/admin/invoices/INV-20260910-K7P4X2M9${suffix}`)
           .set('Authorization', auth(role))
-          .expect(403);
+          // A customer capability is not a staff JWT; valid non-admin staff get 403.
+          .expect(role === 'customer' ? 401 : 403);
     },
   );
   it('unauthenticated/invalid JWT requests cannot look up or download', async () => {

@@ -2,7 +2,6 @@ import { testMongoUri, testDatabaseName } from './support/test-database';
 
 import { INestApplication, Module, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -13,6 +12,11 @@ import { Connection, Model, Types } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { io, Socket } from 'socket.io-client';
+import { randomUUID } from 'node:crypto';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { TableStatus } from '../src/common/enums/table-status.enum';
+import { SessionStatus } from '../src/common/enums/session-status.enum';
+import { createStaffFixtures, scanTableFixture } from './support/e2e-auth';
 import { AppModule } from '../src/app.module';
 import { AppService } from '../src/app.service';
 import { DatabaseModule } from '../src/database/database.module';
@@ -82,6 +86,7 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
   let orderId: string;
   let kitchenAuth: string;
   let waiterAuth: string;
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
   const post = () =>
     request(app.getHttpServer()).post('/ai/order-notes/analyze').send({
       sessionId: sessionId.toString(),
@@ -145,21 +150,16 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
     audits = fixture.get(getModelToken(AiInteraction.name));
     orders = fixture.get(getModelToken(Order.name));
     service = fixture.get(SessionService);
-    const secret =
-      fixture.get(ConfigService).get<string>('JWT_ACCESS_SECRET') ||
-      'default_access_secret_1234567890';
-    const jwt = new JwtService({ secret });
-    const auth = (role: string) =>
-      `Bearer ${jwt.sign({ sub: new Types.ObjectId().toString(), email: 'test@example.invalid', role })}`;
-    kitchenAuth = auth('kitchen');
-    waiterAuth = auth('waiter');
+    staff = await createStaffFixtures(app, [UserRole.KITCHEN, UserRole.WAITER]);
+    kitchenAuth = `Bearer ${staff.token(UserRole.KITCHEN)}`;
+    waiterAuth = `Bearer ${staff.token(UserRole.WAITER)}`;
     await tables.create([
       {
         _id: tableId,
         tableCode: 'P19-A',
         qrCodeUrl: 'test-only',
         currentSessionId: sessionId,
-        status: 'occupied',
+        status: TableStatus.OCCUPIED,
       },
       { _id: otherTableId, tableCode: 'P19-B', qrCodeUrl: 'test-only' },
     ]);
@@ -167,7 +167,7 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       _id: sessionId,
       tableId,
       tableIds: [tableId],
-      status: 'active',
+      status: SessionStatus.ACTIVE,
       cart: [],
     });
     await dishes.create({
@@ -180,9 +180,21 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       allergenTags: ['peanut'],
     });
     await audits.init();
+    const grant = await scanTableFixture(app, tableId.toString());
+    expect(grant.sessionId).toBe(sessionId.toString());
     clients = [
-      io(await app.getUrl(), { transports: ['websocket'], autoConnect: false }),
-      io(await app.getUrl(), { transports: ['websocket'], autoConnect: false }),
+      io(await app.getUrl(), {
+        transports: ['websocket'],
+        autoConnect: false,
+        reconnection: false,
+        auth: { customerToken: grant.customerToken },
+      }),
+      io(await app.getUrl(), {
+        transports: ['websocket'],
+        autoConnect: false,
+        reconnection: false,
+        auth: { customerToken: grant.customerToken },
+      }),
     ];
     for (const socket of clients) {
       const synced = waitCart(socket, () => true);
@@ -203,6 +215,7 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
         });
         await tables?.deleteMany({ _id: { $in: [tableId, otherTableId] } });
         await dishes?.deleteOne({ _id: dishId });
+        await staff?.cleanup();
         const ids = await audits
           ?.find({ feature: 'order-note' })
           .select('_id')
@@ -350,7 +363,7 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       _id: otherSessionId,
       tableId: otherTableId,
       tableIds: [otherTableId],
-      status: 'active',
+      status: SessionStatus.ACTIVE,
       cart: [],
     });
     await tables.updateOne(
@@ -395,9 +408,15 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
     config.set('AI_ENABLED', 'false');
     await post().expect(503);
     const callsBefore = provider.calls.length;
+    const cart = await service.getCart(sessionId.toString());
     const res = await request(app.getHttpServer())
       .post('/orders')
-      .send({ tableId: tableId.toString() })
+      .send({
+        tableId: tableId.toString(),
+        sessionId: sessionId.toString(),
+        cartVersion: cart.version,
+        idempotencyKey: randomUUID(),
+      })
       .expect(201);
     orderId = body(res).orderId;
     expect(provider.calls).toHaveLength(callsBefore);
@@ -471,9 +490,15 @@ describe('Phase 19 real HTTP/Mongo/Socket cart/order/Kitchen (mock provider)', (
       );
       const callsBefore = provider.calls.length;
       await service.addToCart(sessionId.toString(), dishId.toString(), 1, note);
+      const cart = await service.getCart(sessionId.toString());
       const res = await request(app.getHttpServer())
         .post('/orders')
-        .send({ tableId: tableId.toString() })
+        .send({
+          tableId: tableId.toString(),
+          sessionId: sessionId.toString(),
+          cartVersion: cart.version,
+          idempotencyKey: randomUUID(),
+        })
         .expect(201);
       expect(provider.calls).toHaveLength(callsBefore);
       const order = await orders.findById(body(res).orderId).orFail();

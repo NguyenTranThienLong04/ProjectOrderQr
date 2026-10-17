@@ -35,7 +35,7 @@
     "test:unit": "jest --config ./test/jest-unit.cjs --runInBand",
     "test:unit:ci": "jest --config ./test/jest-unit-ci.cjs --runInBand",
     "test:integration": "jest --config ./test/jest-integration.cjs",
-    "test:e2e:ci": "jest --config ./test/jest-e2e.cjs --runTestsByPath test/app.e2e-spec.ts test/ai-foundation.e2e-spec.ts test/ai-demo.e2e-spec.ts"
+    "test:e2e:ci": "npm run test:e2e -- --runInBand"
   },
   "dependencies": {
     "@google/genai": "^2.21.0",

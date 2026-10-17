@@ -8,7 +8,6 @@ import {
   ValidationPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -19,6 +18,10 @@ import { Connection, Model, Types } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { io, Socket } from 'socket.io-client';
+import { randomUUID } from 'node:crypto';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixtures, scanTableFixture } from './support/e2e-auth';
+import { signedIpnFixture } from './support/vnpay-ipn';
 import { AppModule } from '../src/app.module';
 import { AppService } from '../src/app.service';
 import { OrderStatus } from '../src/common/enums/order-status.enum';
@@ -36,7 +39,6 @@ import { Review } from '../src/modules/review/review.schema';
 import { Session } from '../src/modules/session/session.schema';
 import { Table } from '../src/modules/table/table.schema';
 import { PaymentIntent } from '../src/modules/vnpay/payment-intent.schema';
-import { VnpayService } from '../src/modules/vnpay/vnpay.service';
 import { RecommendationService } from '../src/modules/menu/recommendation.service';
 import { MenuService } from '../src/modules/menu/menu.service';
 import { searchCases } from '../scripts/ai-evaluation/dataset.v1';
@@ -86,6 +88,7 @@ type ProviderBody = {
   store: boolean;
 };
 type Cart = {
+  version: number;
   cart: {
     dishId: string;
     quantity: number;
@@ -159,7 +162,8 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
     reviews: Model<Review>,
     audits: Model<AiInteraction>,
     intents: Model<PaymentIntent>;
-  let vnpay: VnpayService, menu: MenuService;
+  let menu: MenuService;
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
   let fetchMock: jest.SpyInstance;
   let warnings: jest.SpyInstance;
   let errors: jest.SpyInstance;
@@ -320,10 +324,7 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
     const appConfig = fixture.get(ConfigService);
     appConfig.set('VNP_TMN_CODE', 'P24TEST');
     appConfig.set('VNP_HASH_SECRET', 'phase24-synthetic-signature-key');
-    appConfig.set(
-      'VNP_URL',
-      'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html',
-    );
+    appConfig.set('VNP_URL', 'http://127.0.0.1/payment-provider-disabled');
     appConfig.set('VNP_RETURN_URL', 'http://127.0.0.1/unused-return');
     app = fixture.createNestApplication<INestApplication<App>>();
     // Only this loopback test app trusts simulated source IPs to isolate quota cases.
@@ -350,18 +351,11 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
     reviews = fixture.get(getModelToken(Review.name));
     audits = fixture.get(getModelToken(AiInteraction.name));
     intents = fixture.get(getModelToken(PaymentIntent.name));
-    vnpay = fixture.get(VnpayService);
     menu = fixture.get(MenuService);
-    const jwt = new JwtService({
-      secret:
-        appConfig.get<string>('JWT_ACCESS_SECRET') ||
-        'default_access_secret_1234567890',
-    });
-    const auth = (role: string) =>
-      `Bearer ${jwt.sign({ sub: new Types.ObjectId().toString(), email: 'p24@example.invalid', role })}`;
-    admin = auth('admin');
-    kitchen = auth('kitchen');
-    waiter = auth('waiter');
+    staff = await createStaffFixtures(app, Object.values(UserRole));
+    admin = `Bearer ${staff.token(UserRole.ADMIN)}`;
+    kitchen = `Bearer ${staff.token(UserRole.KITCHEN)}`;
+    waiter = `Bearer ${staff.token(UserRole.WAITER)}`;
     await tables.create({
       _id: tableId,
       tableCode: 'P24',
@@ -460,6 +454,7 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
         await tables.deleteOne({ _id: tableId });
         await dishes.deleteMany({ _id: { $in: dishIds } });
         await categories.deleteOne({ _id: categoryId });
+        await staff?.cleanup();
         const ids = await audits
           .find({ model: 'phase24-fixture' })
           .select('_id')
@@ -606,6 +601,8 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
   });
 
   async function coreFlow(analysisToken?: string) {
+    const grant = await scanTableFixture(app, ownership.tableId);
+    expect(grant.sessionId).toBe(ownership.sessionId);
     await request(app.getHttpServer())
       .get('/menu')
       .query({ tableId: ownership.tableId })
@@ -624,6 +621,7 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
           autoConnect: false,
           transports: ['websocket'],
           reconnection: false,
+          auth: { customerToken: grant.customerToken },
         });
         const ready = waitCart(sockets[i], () => true);
         sockets[i].on('connect', () =>
@@ -644,7 +642,8 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
           analysisToken,
           confirmedByCustomer: !!analysisToken,
         });
-        for (const cart of await Promise.all(synced)) {
+        const syncedCarts = await Promise.all(synced);
+        for (const cart of syncedCarts) {
           expect(cart.cart[0].note).toBe(rawNote);
           if (analysisToken)
             expect(cart.cart[0].aiNoteAnalysis?.modifierTags).toEqual([
@@ -653,6 +652,9 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
         }
         const order = await post('/orders', {
           tableId: ownership.tableId,
+          sessionId: ownership.sessionId,
+          cartVersion: syncedCarts[0].version,
+          idempotencyKey: randomUUID(),
         }).expect(201);
         const id = String(body(order).orderId);
         created.push(id);
@@ -689,15 +691,13 @@ describe('Phase 24 release: real AppModule / Mongo / HTTP / Socket; simulated pr
       expect([...body(payment).coveredOrderIds].sort()).toEqual(
         [...created].sort(),
       );
-      const params: Record<string, string> = {
-        vnp_TxnRef: String(body(payment).txnRef),
-        vnp_Amount: '16000000',
-        vnp_ResponseCode: '00',
-        vnp_TransactionNo: 'P24_SYNTHETIC_IPN',
-      };
-      params.vnp_SecureHash = (
-        vnpay as unknown as { sign: (p: Record<string, string>) => string }
-      ).sign(params);
+      const params = signedIpnFixture(
+        { txnRef: String(body(payment).txnRef), amount: body(payment).amount },
+        {
+          merchantCode: 'P24TEST',
+          hashSecret: 'phase24-synthetic-signature-key',
+        },
+      );
       await request(app.getHttpServer())
         .get('/vnpay/ipn')
         .query(params)

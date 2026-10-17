@@ -21,6 +21,8 @@ import { User, UserDocument } from '../src/modules/user/user.schema';
 import { UserRole } from '../src/common/enums/user-role.enum';
 import { SessionStatus } from '../src/common/enums/session-status.enum';
 import { TableStatus } from '../src/common/enums/table-status.enum';
+import { randomUUID } from 'node:crypto';
+import { scanTableFixture } from './support/e2e-auth';
 
 const tableCodes = ['A01', 'A02', 'A03', 'A04', 'A05'];
 const categoryName = '__phase7_merge_test__';
@@ -44,16 +46,7 @@ describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
     console.log(`[Phase 7] ${label}: ${JSON.stringify(value)}`);
   const table = (code: string) => tables.get(code)!;
   const active = async (code: string) => {
-    const response = await request(app.getHttpServer())
-      .get('/sessions/active')
-      .query({ tableId: table(code).id })
-      .expect(200);
-    log(`QR ${code} response`, response.body);
-    return response.body as {
-      sessionId: string;
-      tableIds: string[];
-      cart: Array<{ dishId: string; quantity: number }>;
-    };
+    return scanTableFixture(app, table(code).id);
   };
   const merge = async (rootCode: string, sourceCode: string) => {
     const body = { tableIds: [table(rootCode).id, table(sourceCode).id] };
@@ -71,9 +64,16 @@ describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
   const addCart = (sessionId: string, dishIndex: number, quantity: number) =>
     sessionService.addToCart(sessionId, dishes[dishIndex].id, quantity);
   const createOrder = async (code: string) => {
+    const customer = await active(code);
     const response = await request(app.getHttpServer())
       .post('/orders')
-      .send({ tableId: table(code).id })
+      .set('x-customer-token', customer.customerToken)
+      .send({
+        tableId: table(code).id,
+        sessionId: customer.sessionId,
+        cartVersion: customer.version,
+        idempotencyKey: randomUUID(),
+      })
       .expect(201);
     log(`order ${code} response`, response.body);
     return response.body as { orderId: string; sessionId: string };
@@ -82,9 +82,11 @@ describe('Phase 7 table merge/unmerge (real MongoDB)', () => {
   async function seed() {
     // Clear only fixture collections on the database allocated to this suite.
     // Preserve the staff fixture used by the HTTP token across cases.
-    for (const model of [orderModel, sessionModel, tableModel, dishModel]) {
-      await model.deleteMany({}).exec(); // Driver cleanup guard is installed by Jest.
-    }
+    // Driver cleanup guard is installed by Jest for every model below.
+    await orderModel.deleteMany({}).exec();
+    await sessionModel.deleteMany({}).exec();
+    await tableModel.deleteMany({}).exec();
+    await dishModel.deleteMany({}).exec();
     let category = await categoryModel.findOne({ name: categoryName }).exec();
     if (!category)
       category = await categoryModel.create({

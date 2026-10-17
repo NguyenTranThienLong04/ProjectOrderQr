@@ -1,14 +1,16 @@
 import { testMongoUri, testDatabaseName } from './support/test-database';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
+import { ConfigModule, ConfigService } from '@nestjs/config';
 import { getModelToken, MongooseModule } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
 import { Model, Types } from 'mongoose';
 import request from 'supertest';
 import type { App } from 'supertest/types';
 import { DISH_METADATA_OPTIONS } from '../src/modules/dish/dish-metadata';
-import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
+import { AuthModule } from '../src/modules/auth/auth.module';
+import { SessionModule } from '../src/modules/session/session.module';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixtures, createCustomerFixture } from './support/e2e-auth';
 import {
   Dish,
   DishDocument,
@@ -28,7 +30,7 @@ import { CloudinaryService } from '../src/modules/cloudinary/cloudinary.service'
 jest.setTimeout(60000);
 
 /** Real MongoDB, isolated database, real JWT/RolesGuard/DTO/Multer/service/menu.
- * No AppModule startup, staff seed, orders, sessions, payments or external upload. */
+ * Explicit test staff/customer fixtures; no AppModule seed or external upload. */
 describe('Phase 15 catalog HTTP + MongoDB', () => {
   let app: INestApplication<App>;
   let dishes: Model<DishDocument>;
@@ -39,10 +41,13 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
   const tableId = new Types.ObjectId();
   const legacyId = new Types.ObjectId();
   const secret = 'phase15-isolated-test-jwt-not-a-production-credential';
-  const jwt = new JwtService({ secret });
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
+  let customer: Awaited<ReturnType<typeof createCustomerFixture>>;
   const token = (role: string) =>
-    jwt.sign({ sub: 'phase15-test', email: 'phase15@example.invalid', role });
-  const admin = `Bearer ${token('admin')}`;
+    role === 'customer'
+      ? customer.customerToken
+      : staff.token(role as UserRole);
+  let admin: string;
   const base = {
     name: 'Phở bò kiểm thử',
     nameEn: 'Test Beef Pho',
@@ -64,6 +69,9 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
   beforeAll(async () => {
     const fixture = await Test.createTestingModule({
       imports: [
+        ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+        AuthModule,
+        SessionModule,
         MongooseModule.forRoot(testMongoUri(), {
           dbName: testDatabaseName(),
           retryAttempts: 0,
@@ -79,8 +87,6 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
       providers: [
         DishService,
         MenuService,
-        JwtStrategy,
-        { provide: ConfigService, useValue: { get: () => secret } },
         {
           provide: CloudinaryService,
           useValue: {
@@ -92,7 +98,10 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
           },
         },
       ],
-    }).compile();
+    })
+      .overrideProvider(ConfigService)
+      .useValue(new ConfigService({ JWT_ACCESS_SECRET: secret }))
+      .compile();
     app = fixture.createNestApplication<INestApplication<App>>();
     app.useGlobalPipes(
       new ValidationPipe({
@@ -102,6 +111,9 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
       }),
     );
     await app.init();
+    staff = await createStaffFixtures(app, Object.values(UserRole));
+    customer = await createCustomerFixture(app);
+    admin = `Bearer ${token(UserRole.ADMIN)}`;
     dishes = fixture.get(getModelToken(Dish.name));
     categories = fixture.get(getModelToken(Category.name));
     tables = fixture.get(getModelToken(Table.name));
@@ -136,6 +148,8 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
           _id: { $in: [categoryId, hiddenCategoryId] },
         });
       if (tables) await tables.deleteOne({ _id: tableId });
+      await staff?.cleanup();
+      await customer?.cleanup();
     } finally {
       if (app) await app.close();
     }
@@ -150,21 +164,21 @@ describe('Phase 15 catalog HTTP + MongoDB', () => {
       await request(app.getHttpServer())
         .get('/dishes/metadata-options')
         .set('Authorization', auth)
-        .expect(403);
+        .expect(role === 'customer' ? 401 : 403);
       await request(app.getHttpServer())
         .post('/dishes')
         .set('Authorization', auth)
         .send(base)
-        .expect(403);
+        .expect(role === 'customer' ? 401 : 403);
       await request(app.getHttpServer())
         .put(`/dishes/${legacyId.toString()}`)
         .set('Authorization', auth)
         .send(metadata)
-        .expect(403);
+        .expect(role === 'customer' ? 401 : 403);
       await request(app.getHttpServer())
         .delete(`/dishes/${legacyId.toString()}`)
         .set('Authorization', auth)
-        .expect(403);
+        .expect(role === 'customer' ? 401 : 403);
     }
     const result = await request(app.getHttpServer())
       .get('/dishes/metadata-options')

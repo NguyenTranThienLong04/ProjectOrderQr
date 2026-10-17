@@ -19,7 +19,8 @@ import {
   PaymentIntentDocument,
   PaymentIntentStatus,
 } from '../src/modules/vnpay/payment-intent.schema';
-import { VnpayService } from '../src/modules/vnpay/vnpay.service';
+import { ConfigService } from '@nestjs/config';
+import { signedIpnFixture } from './support/vnpay-ipn';
 
 describe('Session payment (real MongoDB + HTTP IPN)', () => {
   let app: INestApplication;
@@ -27,7 +28,6 @@ describe('Session payment (real MongoDB + HTTP IPN)', () => {
   let sessionModel: Model<SessionDocument>;
   let tableModel: Model<TableDocument>;
   let paymentIntentModel: Model<PaymentIntentDocument>;
-  let vnpayService: VnpayService;
   let tableService: TableService;
   let table: TableDocument;
   let session: SessionDocument;
@@ -62,18 +62,11 @@ describe('Session payment (real MongoDB + HTTP IPN)', () => {
   };
 
   const signedIpn = (intent: PaymentIntentDocument) => {
-    const params: Record<string, string> = {
-      vnp_TxnRef: intent.txnRef,
-      vnp_Amount: String(intent.amount * 100),
-      vnp_ResponseCode: '00',
-      vnp_TransactionNo: `E2E${Date.now()}`,
-    };
-    params.vnp_SecureHash = (
-      vnpayService as unknown as {
-        sign: (values: Record<string, string>) => string;
-      }
-    ).sign(params);
-    return params;
+    const config = app.get(ConfigService);
+    return signedIpnFixture(intent, {
+      merchantCode: config.getOrThrow<string>('VNP_TMN_CODE'),
+      hashSecret: config.getOrThrow<string>('VNP_HASH_SECRET'),
+    });
   };
 
   beforeAll(async () => {
@@ -93,7 +86,6 @@ describe('Session payment (real MongoDB + HTTP IPN)', () => {
     sessionModel = moduleFixture.get(getModelToken(Session.name));
     tableModel = moduleFixture.get(getModelToken(Table.name));
     paymentIntentModel = moduleFixture.get(getModelToken(PaymentIntent.name));
-    vnpayService = moduleFixture.get(VnpayService);
     tableService = moduleFixture.get(TableService);
   });
 

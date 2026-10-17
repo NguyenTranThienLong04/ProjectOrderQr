@@ -2,7 +2,6 @@ import { testMongoUri, testDatabaseName } from './support/test-database';
 
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -21,7 +20,9 @@ import {
   type MockAiStep,
 } from '../src/modules/ai/testing/mock-ai-provider';
 import { validAiEnv } from '../src/modules/ai/testing/ai-test.fixture';
-import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
+import { AuthModule } from '../src/modules/auth/auth.module';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { createStaffFixtures } from './support/e2e-auth';
 import {
   Category,
   CategorySchema,
@@ -42,7 +43,8 @@ describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
   const dishId = new Types.ObjectId();
   const tableId = new Types.ObjectId();
   const secret = 'phase18-isolated-jwt';
-  const auth = `Bearer ${new JwtService({ secret }).sign({ sub: 'test', email: 'test@example.invalid', role: 'admin' })}`;
+  let auth: string;
+  let staff: Awaited<ReturnType<typeof createStaffFixtures>>;
   const config = new ConfigService({
     ...validAiEnv,
     AI_MAX_RETRIES: '0',
@@ -95,10 +97,10 @@ describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
           { name: Table.name, schema: TableSchema },
         ]),
         CatalogDraftAiModule,
+        AuthModule,
       ],
       controllers: [DishController, MenuController],
       providers: [
-        JwtStrategy,
         DishService,
         MenuService,
         {
@@ -121,6 +123,8 @@ describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
       }),
     );
     await app.init();
+    staff = await createStaffFixtures(app, [UserRole.ADMIN]);
+    auth = `Bearer ${staff.token(UserRole.ADMIN)}`;
     connection = fixture.get(getConnectionToken());
     expect(connection.name).toBe(dbName);
     dishes = fixture.get(getModelToken(Dish.name));
@@ -155,6 +159,7 @@ describe('Phase 18 real Mongo + HTTP draft/review/CRUD boundary', () => {
         await dishes?.deleteOne({ _id: dishId });
         await categories?.deleteOne({ _id: categoryId });
         await tables?.deleteOne({ _id: tableId });
+        await staff?.cleanup();
         if (audit) {
           const entries = await audit
             .find({ feature: 'dish-draft' })

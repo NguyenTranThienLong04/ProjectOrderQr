@@ -2,7 +2,6 @@ import { testMongoUri, testDatabaseName } from './support/test-database';
 
 import { INestApplication } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { JwtService } from '@nestjs/jwt';
 import {
   getConnectionToken,
   getModelToken,
@@ -23,7 +22,10 @@ import {
 } from '../src/modules/ai/testing/mock-ai-provider';
 import { validAiEnv } from '../src/modules/ai/testing/ai-test.fixture';
 import { AiInteraction } from '../src/modules/ai/schemas/ai-interaction.schema';
-import { JwtStrategy } from '../src/modules/auth/jwt.strategy';
+import { AuthModule } from '../src/modules/auth/auth.module';
+import { UserRole } from '../src/common/enums/user-role.enum';
+import { User, UserDocument } from '../src/modules/user/user.schema';
+import { createStaffFixture } from './support/e2e-auth';
 import { Order } from '../src/modules/order/order.schema';
 import { Dish } from '../src/modules/dish/dish.schema';
 import { Review } from '../src/modules/review/review.schema';
@@ -33,9 +35,10 @@ import { buildCatalog } from '../scripts/ai-demo/catalog';
 jest.setTimeout(60000);
 describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', () => {
   const dbName = testDatabaseName();
-  const secret = 'phase21-integration-test',
-    jwt = new JwtService({ secret });
-  const authorization = `Bearer ${jwt.sign({ sub: 'fixture', email: 'fixture@example.invalid', role: 'admin' })}`;
+  const secret = 'phase21-integration-test';
+  let authorization: string;
+  let staffId: Types.ObjectId;
+  let users: Model<UserDocument>;
   const steps: MockAiStep[] = [],
     provider = new MockAiProvider(steps);
   const dish = buildCatalog().dishes[0];
@@ -90,9 +93,9 @@ describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', (
           retryAttempts: 0,
           serverSelectionTimeoutMS: 15000,
         }),
+        AuthModule,
         AdminAnalyticsAiModule,
       ],
-      providers: [JwtStrategy],
     })
       .overrideProvider(ConfigService)
       .useValue(
@@ -113,6 +116,10 @@ describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', (
     dishes = fixture.get(getModelToken(Dish.name));
     reviews = fixture.get(getModelToken(Review.name));
     audit = fixture.get(getModelToken(AiInteraction.name));
+    users = fixture.get(getModelToken(User.name));
+    const staff = await createStaffFixture(app, UserRole.ADMIN);
+    staffId = staff.user._id;
+    authorization = `Bearer ${staff.accessToken}`;
     await dishes.insertMany([dish]);
     const amounts = [7500000, 5000000, 10000000, 9000000, 99999999];
     const times = [
@@ -163,6 +170,7 @@ describe('Phase 21 real Mongo/HTTP aggregation (isolated synthetic fixtures)', (
         await orders?.deleteMany({ _id: { $in: orderIds } });
         await dishes?.deleteOne({ _id: dish._id });
         await reviews?.deleteMany({ _id: { $in: reviewIds } });
+        if (staffId) await users.deleteOne({ _id: staffId });
         const entries = await audit
           ?.find({
             feature: {
