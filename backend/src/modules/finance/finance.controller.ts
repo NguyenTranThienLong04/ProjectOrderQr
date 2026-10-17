@@ -14,7 +14,8 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { UserRole } from '../../common/enums/user-role.enum';
 import { CashActor, CashShiftService } from './cash-shift.service';
 import {
-  CloseShiftDto,
+  SubmitShiftDto,
+  VerifyShiftDto,
   OpenShiftDto,
   PageQuery,
   RevenueQuery,
@@ -46,9 +47,18 @@ export class RevenueController {
 export class CashReconciliationController {
   constructor(private readonly shifts: CashShiftService) {}
 
+  @Post(':id/verify')
+  verify(
+    @Param() params: ShiftParams,
+    @Body() input: VerifyShiftDto,
+    @Req() req: { user: CashActor },
+  ) {
+    return this.shifts.verify(params.id, input, req.user);
+  }
+
   @Get()
-  list(@Query() query: ShiftQuery) {
-    return this.shifts.list(query);
+  list(@Query() query: ShiftQuery, @Req() req: { user: CashActor }) {
+    return this.shifts.list(query, req.user, false);
   }
 
   @Get(':id')
@@ -91,12 +101,12 @@ export class CashShiftController {
     return this.shifts.detail(params.id, req.user, query.page);
   }
 
-  @Post(':id/close')
-  close(
+  @Post(':id/submit')
+  submit(
     @Param() params: ShiftParams,
-    @Body() input: CloseShiftDto,
+    @Body() input: SubmitShiftDto,
     @Req() req: { user: CashActor },
   ) {
-    return this.shifts.close(params.id, input, req.user);
+    return this.shifts.submit(params.id, input, req.user);
   }
 }

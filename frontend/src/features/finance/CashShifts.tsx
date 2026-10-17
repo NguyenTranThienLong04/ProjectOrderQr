@@ -14,14 +14,15 @@ import {
   type ShiftList,
   type StaffOption,
 } from "../../services/api/finance";
-import { CashValues, Pagination, ReceiptTable } from "./FinanceShared";
+import { Pagination } from "./FinanceShared";
 import {
-  financeError,
-  inputClass,
-  money,
-  panelClass,
-  time,
-} from "./finance-format";
+  CashShiftReview,
+  ShiftCashValues,
+  cashAmount,
+  hasDiscrepancy,
+  shiftStatus,
+} from "./CashShiftReview";
+import { financeError, inputClass, panelClass, time } from "./finance-format";
 
 function ShiftDialog({
   id,
@@ -40,7 +41,7 @@ function ShiftDialog({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [actual, setActual] = useState("");
+  const [count, setCount] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
@@ -59,14 +60,18 @@ function ShiftDialog({
     return () => controller.abort();
   }, [id, page, refresh]);
 
-  async function close(event: FormEvent) {
+  async function save(event: FormEvent) {
     event.preventDefault();
     if (!detail || saving) return;
     setSaving(true);
     setError("");
     try {
-      const result = await financeApi.close(id, Number(actual), detail.version);
+      const result =
+        detail.status === "OPEN"
+          ? await financeApi.submit(id, Number(count), detail.version)
+          : await financeApi.verify(id, Number(count), detail.version);
       setDetail(result);
+      setCount("");
       onChanged();
     } catch (err) {
       setError(financeError(err));
@@ -82,7 +87,7 @@ function ShiftDialog({
         if (!saving) onClose();
       }}
       title="Đối soát ca tiền mặt"
-      description="Dự kiến = tiền đầu ca + CASH đã thu. VNPAY không nằm trong ca tiền mặt."
+      description="Kê khai tiền đã đếm và gửi Admin xác minh để hoàn tất ca."
       size="lg"
       footer={
         <button
@@ -109,108 +114,20 @@ function ShiftDialog({
           </button>
         )}
         {detail && (
-          <>
-            <p className="text-sm">
-              <strong>{detail.staffName}</strong> · Mở lúc{" "}
-              {time(detail.openedAt)} ·{" "}
-              {detail.status === "OPEN" ? "Đang mở" : "Đã đóng"}
-            </p>
-            <CashValues {...detail} />
-            {detail.status === "OPEN" ? (
-              <form
-                onSubmit={(event) => void close(event)}
-                className="space-y-3 border-t border-slate-200 pt-4"
-              >
-                <label
-                  htmlFor="actual-cash"
-                  className="block text-sm font-semibold"
-                >
-                  Tiền thực tế nộp (VND)
-                </label>
-                <input
-                  id="actual-cash"
-                  type="number"
-                  inputMode="numeric"
-                  min="0"
-                  max={Number.MAX_SAFE_INTEGER}
-                  step="1"
-                  required
-                  className={inputClass}
-                  value={actual}
-                  disabled={saving}
-                  onChange={(event) => setActual(event.target.value)}
-                  aria-describedby="close-hint"
-                />
-                <p id="close-hint" className="text-sm text-slate-600">
-                  Kiểm đếm trước khi đóng. Kết quả đóng ca sẽ được lưu và không
-                  thể chỉnh sửa.
-                </p>
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    className={primaryButtonClass}
-                    disabled={saving || loading || actual === ""}
-                  >
-                    {saving ? "Đang đóng ca…" : "Xác nhận đóng ca"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={saving || loading}
-                    className={secondaryButtonClass}
-                    onClick={() => {
-                      setError("");
-                      setRefresh((value) => value + 1);
-                    }}
-                  >
-                    Cập nhật số tiền
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <div className="space-y-3 border-t border-slate-200 pt-4">
-                <dl className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <dt className="text-sm text-slate-600">Thực tế nộp</dt>
-                    <dd className="text-xl font-bold tabular-nums">
-                      {money(detail.actualCash!)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-sm text-slate-600">
-                      Chênh lệch (thực tế − dự kiến)
-                    </dt>
-                    <dd
-                      className={`text-xl font-bold tabular-nums ${detail.variance !== 0 ? "text-amber-800" : "text-emerald-700"}`}
-                    >
-                      {money(detail.variance!)}
-                    </dd>
-                  </div>
-                </dl>
-                <Feedback tone={detail.variance !== 0 ? "warning" : "success"}>
-                  {detail.variance !== 0
-                    ? "Có chênh lệch đối soát. Cần kiểm tra các khoản thu và tiền bàn giao."
-                    : "Tiền thực tế khớp tiền dự kiến."}
-                </Feedback>
-                <p className="text-sm text-slate-600">
-                  Đóng lúc {time(detail.closedAt)} · Người đóng:{" "}
-                  {detail.closedByName ?? "Không còn thông tin"}. Kết quả đã
-                  được lưu.
-                </p>
-              </div>
-            )}
-            <section className="space-y-3">
-              <h2 className="font-bold">
-                Hóa đơn CASH trong ca ({detail.transactionCount})
-              </h2>
-              <ReceiptTable rows={detail.transactions} admin={admin} />
-              <Pagination
-                page={detail.page}
-                pageSize={detail.pageSize}
-                total={detail.transactionCount}
-                onPage={setPage}
-                disabled={saving}
-              />
-            </section>
-          </>
+          <CashShiftReview
+            detail={detail}
+            admin={admin}
+            saving={saving}
+            loading={loading}
+            count={count}
+            onCount={setCount}
+            onAction={(event) => void save(event)}
+            onReload={() => {
+              setError("");
+              setRefresh((value) => value + 1);
+            }}
+            onPage={setPage}
+          />
         )}
       </div>
     </Modal>
@@ -295,7 +212,7 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
     <div className="space-y-6">
       <PageHeader
         title={admin ? "Đối soát tiền mặt" : "Ca tiền mặt của tôi"}
-        description="Mỗi nhân viên có một ca đang mở. Thu CASH được ghi vào ca của người xác nhận thanh toán."
+        description="Mỗi nhân viên có một ca đang mở hoặc chờ xác minh. Thu CASH được ghi vào ca của người xác nhận thanh toán."
         actions={
           <button
             className={secondaryButtonClass}
@@ -317,12 +234,19 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
                 Mở lúc {time(current.openedAt)} · {current.transactionCount} hóa
                 đơn CASH
               </p>
-              <CashValues {...current} />
+              <ShiftCashValues shift={current} />
+              {current.status === "PENDING_REVIEW" && (
+                <Feedback tone="info">
+                  Ca đang chờ Admin xác minh. Chưa thể mở ca mới.
+                </Feedback>
+              )}
               <button
                 className={primaryButtonClass}
                 onClick={() => setSelected(current.id)}
               >
-                Xem và đóng ca
+                {current.status === "OPEN"
+                  ? "Kê khai và gửi đối soát"
+                  : "Xem ca chờ xác minh"}
               </button>
             </>
           ) : (
@@ -380,6 +304,7 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
               >
                 <option value="">Tất cả</option>
                 <option value="OPEN">Đang mở</option>
+                <option value="PENDING_REVIEW">Chờ Admin xác minh</option>
                 <option value="CLOSED">Đã đóng</option>
               </select>
             </label>
@@ -417,12 +342,15 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
                     <tr>
                       {[
                         "Nhân viên",
-                        "Mở / đóng ca",
+                        "Mở ca",
+                        "Gửi đối soát",
                         "Trạng thái",
                         "Dự kiến",
-                        "Thực tế",
-                        "Chênh lệch",
-                        "Chi tiết",
+                        "Kê khai",
+                        "Chênh lệch kê khai",
+                        "Đã xác minh",
+                        "Chênh lệch xác minh",
+                        "Thao tác",
                       ].map((label) => (
                         <th
                           scope="col"
@@ -438,37 +366,59 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
                     {list.shifts.map((shift) => (
                       <tr
                         key={shift.id}
-                        className={
-                          shift.variance !== null && shift.variance !== 0
-                            ? "bg-amber-50"
-                            : ""
-                        }
+                        className={hasDiscrepancy(shift) ? "bg-amber-50" : ""}
                       >
                         <td className="px-4 py-3 font-medium">
                           {shift.staffName}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3">
                           {time(shift.openedAt)}
-                          <span className="block text-slate-600">
-                            {time(shift.closedAt)}
-                          </span>
                         </td>
                         <td className="whitespace-nowrap px-4 py-3">
-                          {shift.status === "OPEN" ? "Đang mở" : "Đã đóng"}
+                          {time(shift.submittedAt)}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3">
+                          {shiftStatus[shift.status]}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 tabular-nums">
-                          {money(shift.expectedCash)}
+                          {shift.status === "OPEN" &&
+                          (!admin || shift.canSubmit)
+                            ? "Ẩn khi kê khai"
+                            : cashAmount(shift.expectedCash)}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 tabular-nums">
-                          {shift.actualCash === null
-                            ? "—"
-                            : money(shift.actualCash)}
+                          {cashAmount(shift.declaredCash)}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 tabular-nums">
+                          {cashAmount(shift.declaredVariance)}
+                        </td>
+                        <td className="whitespace-nowrap px-4 py-3 tabular-nums">
+                          {cashAmount(shift.verifiedCash)}
+                          {shift.status === "CLOSED" &&
+                            shift.submittedAt == null &&
+                            shift.actualCash != null && (
+                              <span className="block text-slate-600">
+                                Thực tế ca cũ: {cashAmount(shift.actualCash)}
+                              </span>
+                            )}
+                          {shift.declaredCash != null &&
+                            shift.verifiedCash != null &&
+                            shift.declaredCash !== shift.verifiedCash && (
+                              <span className="block text-xs text-amber-900">
+                                Khác kê khai
+                              </span>
+                            )}
                         </td>
                         <td className="whitespace-nowrap px-4 py-3 font-semibold tabular-nums">
-                          {shift.variance === null
-                            ? "Chưa đối soát"
-                            : money(shift.variance)}
-                          {shift.variance !== null && shift.variance !== 0 && (
+                          {cashAmount(shift.verifiedVariance)}
+                          {shift.status === "CLOSED" &&
+                            shift.submittedAt == null &&
+                            shift.variance != null && (
+                              <span className="block text-slate-600">
+                                Chênh lệch ca cũ: {cashAmount(shift.variance)}
+                              </span>
+                            )}
+                          {hasDiscrepancy(shift) && (
                             <span className="block text-xs text-amber-900">
                               Có chênh lệch
                             </span>
@@ -477,10 +427,12 @@ export function CashShifts({ admin = false }: { admin?: boolean }) {
                         <td className="px-4 py-3">
                           <button
                             className={secondaryButtonClass}
-                            aria-label={`Chi tiết ca ${shift.staffName}, ${time(shift.openedAt)}`}
+                            aria-label={`${admin && shift.canVerify ? "Xác minh ca" : "Chi tiết ca"} ${shift.staffName}, ${time(shift.openedAt)}`}
                             onClick={() => setSelected(shift.id)}
                           >
-                            Chi tiết
+                            {admin && shift.canVerify
+                              ? "Xác minh ca"
+                              : "Chi tiết"}
                           </button>
                         </td>
                       </tr>

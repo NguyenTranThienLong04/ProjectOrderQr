@@ -29,6 +29,31 @@ export class CashShift {
   expectedCash!: number | null;
 
   @Prop({ type: Number, default: null })
+  declaredCash!: number | null;
+
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'User', default: null })
+  declaredBy!: Types.ObjectId | null;
+
+  @Prop({ type: Date, default: null })
+  submittedAt!: Date | null;
+
+  @Prop({ type: Number, default: null })
+  declaredVariance!: number | null;
+
+  @Prop({ type: Number, default: null })
+  verifiedCash!: number | null;
+
+  @Prop({ type: SchemaTypes.ObjectId, ref: 'User', default: null })
+  verifiedBy!: Types.ObjectId | null;
+
+  @Prop({ type: Date, default: null })
+  verifiedAt!: Date | null;
+
+  @Prop({ type: Number, default: null })
+  verifiedVariance!: number | null;
+
+  // Legacy closing evidence only; never backfill it as an Admin verification.
+  @Prop({ type: Number, default: null })
   actualCash!: number | null;
 
   @Prop({ type: Number, default: null })
@@ -36,11 +61,11 @@ export class CashShift {
 
   @Prop({
     type: String,
-    enum: ['OPEN', 'CLOSED'],
+    enum: ['OPEN', 'PENDING_REVIEW', 'CLOSED'],
     default: 'OPEN',
     required: true,
   })
-  status!: 'OPEN' | 'CLOSED';
+  status!: 'OPEN' | 'PENDING_REVIEW' | 'CLOSED';
 
   @Prop({ type: SchemaTypes.ObjectId, ref: 'User', default: null })
   closedBy!: Types.ObjectId | null;
@@ -48,7 +73,7 @@ export class CashShift {
   @Prop({ type: String, default: null })
   closedByName!: string | null;
 
-  /** Shared write fence for settlement and close; also a close-preview token. */
+  /** Shared write fence for settlement, submission and verification. */
   @Prop({ required: true, default: 0 })
   version!: number;
 }
@@ -63,3 +88,12 @@ CashShiftSchema.index(
   },
 );
 CashShiftSchema.index({ status: 1, openedAt: -1 });
+// Additive index: keep the deployed OPEN index and all legacy CLOSED data.
+CashShiftSchema.index(
+  { staffId: 1 },
+  {
+    unique: true,
+    name: 'one_non_final_cash_shift_per_staff',
+    partialFilterExpression: { status: { $in: ['OPEN', 'PENDING_REVIEW'] } },
+  },
+);

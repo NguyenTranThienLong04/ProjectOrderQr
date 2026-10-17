@@ -24,6 +24,7 @@ export interface RevenueTotals {
 }
 export interface RevenueReport extends RevenueTotals {
   cashInOpenShifts: number;
+  cashInPendingReviewShifts: number;
   cashInClosedShifts: number;
   unassignedHistoricalCash: number;
   timezone: string;
@@ -52,11 +53,21 @@ export interface CashShift {
   openedAt: string;
   closedAt: string | null;
   openingCash: number;
-  cashSales: number;
-  expectedCash: number;
+  cashSales?: number;
+  expectedCash?: number;
   actualCash: number | null;
-  variance: number | null;
-  status: "OPEN" | "CLOSED";
+  variance?: number | null;
+  declaredCash: number | null;
+  declaredBy: string | null;
+  submittedAt: string | null;
+  declaredVariance?: number | null;
+  verifiedCash: number | null;
+  verifiedBy: string | null;
+  verifiedAt: string | null;
+  verifiedVariance?: number | null;
+  status: "OPEN" | "PENDING_REVIEW" | "CLOSED";
+  canSubmit: boolean;
+  canVerify: boolean;
   closedBy: string | null;
   closedByName: string | null;
   version: number;
@@ -120,10 +131,17 @@ export const financeApi = {
     ).data,
   open: async (openingCash: number) =>
     (await axiosClient.post<ShiftDetail>("/cash-shifts", { openingCash })).data,
-  close: async (id: string, actualCash: number, version: number) =>
+  submit: async (id: string, declaredCash: number, version: number) =>
     (
-      await axiosClient.post<ShiftDetail>(`/cash-shifts/${id}/close`, {
-        actualCash,
+      await axiosClient.post<ShiftDetail>(`/cash-shifts/${id}/submit`, {
+        declaredCash,
+        version,
+      })
+    ).data,
+  verify: async (id: string, verifiedCash: number, version: number) =>
+    (
+      await axiosClient.post<ShiftDetail>(`/admin/cash-shifts/${id}/verify`, {
+        verifiedCash,
         version,
       })
     ).data,

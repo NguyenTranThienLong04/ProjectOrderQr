@@ -49,16 +49,36 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       .post('/cash-shifts')
       .set('Authorization', auth(name))
       .send({ openingCash });
-  const close = (
+  const submit = (
     id: string,
     version: number,
-    actualCash: number,
+    declaredCash: number,
     name = 'waiter',
   ) =>
     request(http())
-      .post(`/cash-shifts/${id}/close`)
+      .post(`/cash-shifts/${id}/submit`)
       .set('Authorization', auth(name))
-      .send({ version, actualCash });
+      .send({ version, declaredCash });
+
+  const verify = (
+    id: string,
+    version: number,
+    verifiedCash: number,
+    name = 'admin',
+  ) =>
+    request(http())
+      .post(`/admin/cash-shifts/${id}/verify`)
+      .set('Authorization', auth(name))
+      .send({ version, verifiedCash });
+  const auditedCurrent = async (name: string) => {
+    const current = await drawer.current(actors[name]);
+    return current
+      ? drawer.detail(
+          String(current.id),
+          actors[name === 'admin' ? 'admin2' : 'admin'],
+        )
+      : null;
+  };
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -87,6 +107,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     const users = app.get<Model<User>>(getModelToken(User.name));
     for (const [name, role] of [
       ['admin', UserRole.ADMIN],
+      ['admin2', UserRole.ADMIN],
       ['waiter', UserRole.WAITER],
       ['other', UserRole.WAITER],
       ['kitchen', UserRole.KITCHEN],
@@ -207,6 +228,246 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     return params;
   }
 
+  it('keeps every owner OPEN response blind until submission, including receipt amounts', async () => {
+    const opened = await open().expect(201);
+    const id = opened.body.id as string;
+    const sale = await bill(8000);
+    await payments.settleCash(sale.table.id, sale.preview, actors.waiter);
+    const responses = [opened.body];
+    for (const path of [
+      '/cash-shifts/current',
+      '/cash-shifts/mine',
+      `/cash-shifts/${id}`,
+    ]) {
+      const result = (
+        await request(http())
+          .get(path)
+          .set('Authorization', auth('waiter'))
+          .expect(200)
+      ).body;
+      responses.push(result.shifts ? result.shifts[0] : result);
+    }
+    for (const response of responses) {
+      for (const field of [
+        'cashSales',
+        'expectedCash',
+        'variance',
+        'declaredVariance',
+        'verifiedVariance',
+      ])
+        expect(response).not.toHaveProperty(field);
+      if (response.transactions) expect(response.transactions).toEqual([]);
+      expect(response.canSubmit).toBe(true);
+      expect(response.canVerify).toBe(false);
+    }
+    const pending = await submit(id, 1, 57000).expect(201);
+    expect(pending.body).toMatchObject({
+      status: 'PENDING_REVIEW',
+      expectedCash: 58000,
+      cashSales: 8000,
+      declaredCash: 57000,
+      declaredVariance: -1000,
+      declaredBy: actors.waiter.id,
+      verifiedCash: null,
+      verifiedAt: null,
+      closedAt: null,
+      canSubmit: false,
+    });
+    expect(pending.body.transactions).toHaveLength(1);
+    expect((await drawer.current(actors.waiter))?.status).toBe(
+      'PENDING_REVIEW',
+    );
+  });
+
+  it('rejects client cash totals, variances, verification and legacy close payloads', async () => {
+    const id = (await open().expect(201)).body.id as string;
+    for (const extra of [
+      { expectedCash: 0 },
+      { declaredVariance: 0 },
+      { verifiedCash: 0 },
+      { variance: 0 },
+      { declaredBy: actors.other.id },
+    ]) {
+      await request(http())
+        .post(`/cash-shifts/${id}/submit`)
+        .set('Authorization', auth('waiter'))
+        .send({ version: 0, declaredCash: 0, ...extra })
+        .expect(400);
+    }
+    await request(http())
+      .post(`/cash-shifts/${id}/close`)
+      .set('Authorization', auth('waiter'))
+      .send({ version: 0, actualCash: 50000 })
+      .expect(404);
+    await submit(id, 0, 50000).expect(201);
+    for (const extra of [
+      { expectedCash: 0 },
+      { verifiedVariance: 0 },
+      { declaredCash: 0 },
+    ]) {
+      await request(http())
+        .post(`/admin/cash-shifts/${id}/verify`)
+        .set('Authorization', auth())
+        .send({ version: 1, verifiedCash: 50000, ...extra })
+        .expect(400);
+    }
+  });
+
+  it('commits only one simultaneous submission and rejects duplicate retries without changing the declaration', async () => {
+    const id = (await open().expect(201)).body.id as string;
+    const attempts = await Promise.all([
+      submit(id, 0, 51000),
+      submit(id, 0, 52000),
+    ]);
+    expect(attempts.map((result) => result.status).sort()).toEqual([201, 409]);
+    const stored = await shifts.findById(id).lean().orFail();
+    await submit(id, 0, 50000).expect(409);
+    await submit(id, 1, 50000).expect(409);
+    const openings = await Promise.all([open(), open()]);
+    expect(openings.map((result) => result.status)).toEqual([409, 409]);
+    expect(await shifts.findById(id).lean().orFail()).toEqual(stored);
+  });
+
+  it('commits only one of two Admin verifications and keeps the complete CLOSED audit immutable on retry', async () => {
+    const id = (await open().expect(201)).body.id as string;
+    await submit(id, 0, 49000).expect(201);
+    await verify(id, 0, 50000).expect(409);
+    const attempts = await Promise.all([
+      verify(id, 1, 48000),
+      verify(id, 1, 47000, 'admin2'),
+    ]);
+    expect(attempts.map((result) => result.status).sort()).toEqual([201, 409]);
+    const winner = attempts.find((result) => result.status === 201)!.body;
+    expect(winner).toMatchObject({
+      status: 'CLOSED',
+      declaredCash: 49000,
+      declaredVariance: -1000,
+      version: 2,
+    });
+    expect(winner.verifiedVariance).toBe(
+      winner.verifiedCash - winner.expectedCash,
+    );
+    expect(winner.verifiedAt).toBe(winner.closedAt);
+    expect(winner.verifiedBy).toBe(winner.closedBy);
+    const stored = await shifts.findById(id).lean().orFail();
+    await verify(id, 1, winner.verifiedCash).expect(409);
+    await verify(id, 2, 0, 'admin2').expect(409);
+    expect(await shifts.findById(id).lean().orFail()).toEqual(stored);
+    await open().expect(201);
+  });
+
+  it('requires a different Admin to verify an Admin own shift', async () => {
+    const opened = await open('admin').expect(201);
+    expect(opened.body).not.toHaveProperty('expectedCash');
+    const id = opened.body.id as string;
+    await submit(id, 0, 50000, 'admin').expect(201);
+    await verify(id, 1, 50000, 'admin').expect(403);
+    await open('admin').expect(409);
+    await verify(id, 1, 50000, 'admin2').expect(201);
+    await open('admin').expect(201);
+  });
+
+  it('blocks fresh CASH during PENDING_REVIEW and after verification without changing revenue', async () => {
+    const id = (await open().expect(201)).body.id as string;
+    await fixture(
+      'CASH',
+      10000,
+      undefined,
+      PaymentIntentStatus.SUCCEEDED,
+      new Types.ObjectId(id),
+    );
+    await fixture(
+      'vnpay',
+      12000,
+      undefined,
+      PaymentIntentStatus.SUCCEEDED,
+      new Types.ObjectId(id),
+    );
+    await fixture('CASH', 7000); // Historical/unassigned stays independent.
+    const before = (await report().expect(200)).body;
+    const sale = await bill(8000);
+    const pending = await submit(id, 0, 59000).expect(201);
+    expect(pending.body.expectedCash).toBe(60000); // Excludes VNPAY even with a legacy shift link.
+    await expect(
+      payments.settleCash(sale.table.id, sale.preview, actors.waiter),
+    ).rejects.toThrow();
+    const during = (await report().expect(200)).body;
+    await verify(id, 1, 58000).expect(201);
+    await expect(
+      payments.settleCash(sale.table.id, sale.preview, actors.waiter),
+    ).rejects.toThrow();
+    const after = (await report().expect(200)).body;
+    expect(during).toMatchObject({
+      cashInOpenShifts: 0,
+      cashInPendingReviewShifts: 10000,
+      cashInClosedShifts: 0,
+    });
+    expect(after).toMatchObject({
+      cashInOpenShifts: 0,
+      cashInPendingReviewShifts: 0,
+      cashInClosedShifts: 10000,
+    });
+    for (const result of [during, after]) {
+      for (const key of [
+        'totalRevenue',
+        'cashRevenue',
+        'vnpayRevenue',
+        'transactionCount',
+        'unassignedHistoricalCash',
+        'byDay',
+        'byPaymentMethod',
+        'cashByStaff',
+        'transactions',
+      ])
+        expect(result[key]).toEqual(before[key]);
+    }
+    expect((await shifts.findById(id).orFail()).expectedCash).toBe(60000);
+    expect(await receipts.countDocuments({ sessionId: sale.session._id })).toBe(
+      0,
+    );
+  });
+
+  it('reads legacy CLOSED evidence without inventing declared or verified data or rewriting documents', async () => {
+    const id = new Types.ObjectId();
+    const legacy = {
+      _id: id,
+      staffId: new Types.ObjectId(actors.waiter.id),
+      staffName: 'legacy',
+      openedAt: new Date('2026-10-01'),
+      closedAt: new Date('2026-10-02'),
+      openingCash: 50000,
+      status: 'CLOSED',
+      expectedCash: 60000,
+      actualCash: 59000,
+      variance: -1000,
+      closedBy: new Types.ObjectId(actors.waiter.id),
+      closedByName: 'waiter',
+      version: 1,
+    };
+    await shifts.collection.insertOne(legacy);
+    await drawer.onModuleInit(); // Additive, repeatable index installation.
+    const response = await request(http())
+      .get(`/cash-shifts/${id}`)
+      .set('Authorization', auth('waiter'))
+      .expect(200);
+    expect(response.body).toMatchObject({
+      status: 'CLOSED',
+      actualCash: 59000,
+      variance: -1000,
+      expectedCash: 60000,
+      declaredCash: null,
+      verifiedCash: null,
+      declaredBy: null,
+      verifiedBy: null,
+      submittedAt: null,
+      verifiedAt: null,
+      canSubmit: false,
+      canVerify: false,
+    });
+    await verify(String(id), 1, 60000).expect(409);
+    expect(await shifts.collection.findOne({ _id: id })).toEqual(legacy);
+  });
+
   it('separates open, closed and historical CASH over the whole multi-day range, independently of pagination', async () => {
     const openShift = (await open('waiter', 1000).expect(201)).body
       .id as string;
@@ -230,7 +491,8 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     );
     await fixture('vnpay', 400, '2026-10-18T16:59:59.999Z');
     await fixture('CASH', 999, '2026-10-18T17:00:00.000Z');
-    await close(closedShift, 0, 2200, 'other').expect(201);
+    await submit(closedShift, 0, 2200, 'other').expect(201);
+    await verify(closedShift, 1, 2200).expect(201);
     const totals = {
       cashRevenue: 600,
       vnpayRevenue: 400,
@@ -275,7 +537,8 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       cashInOpenShifts: 0,
       unassignedHistoricalCash: 0,
     });
-    await close(openShift, 0, 1300).expect(201);
+    await submit(openShift, 0, 1300).expect(201);
+    await verify(openShift, 1, 1300).expect(201);
     expect((await report({ to: '2026-10-18' }).expect(200)).body).toMatchObject(
       { ...totals, cashInOpenShifts: 0, cashInClosedShifts: 500 },
     );
@@ -332,7 +595,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       .toISOString()
       .slice(0, 10);
     const revenue = (await report({ from: day, to: day }).expect(200)).body;
-    const shift = await drawer.current(actors.admin);
+    const shift = await auditedCurrent('admin');
     expect([
       settled.amount,
       receipt.amount,
@@ -355,7 +618,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       ],
     });
     expect(shift?.expectedCash).toBe(58000);
-    expect((await drawer.current(actors.waiter))?.cashSales).toBe(0);
+    expect((await auditedCurrent('waiter'))?.cashSales).toBe(0);
   });
 
   it('invalid merchant/status never settles and late IPN after CASH stays superseded without double revenue', async () => {
@@ -419,7 +682,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       cashInOpenShifts: 12000,
       unassignedHistoricalCash: 0,
     });
-    expect((await drawer.current(actors.waiter))?.cashSales).toBe(12000);
+    expect((await auditedCurrent('waiter'))?.cashSales).toBe(12000);
   });
 
   it('sums successful receipts at Vietnam day boundaries, groups methods/staff, and excludes all non-settlements', async () => {
@@ -524,7 +787,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     expect(response.body.transactions).toHaveLength(1);
   });
 
-  it('attributes CASH to the collector/active shift, computes expected and persists actual/variance; closed membership stays fixed', async () => {
+  it('attributes CASH to the collector/active shift, snapshots expected, preserves declared/verified counts, and keeps closed membership fixed', async () => {
     const sale = await bill();
     await request(http())
       .post(`/payments/tables/${sale.table.id}/cash-settlement`)
@@ -547,32 +810,40 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       .expect(200);
     expect(current.body).toMatchObject({
       openingCash: 50000,
-      cashSales: 5000000,
-      expectedCash: 5050000,
       version: 1,
     });
-    await close(id, 0, 4850000).expect(409); // Preview predates the sale.
+    await submit(id, 0, 4850000).expect(409); // Preview predates the sale.
     await request(http())
-      .post(`/cash-shifts/${id}/close`)
+      .post(`/cash-shifts/${id}/submit`)
       .set('Authorization', auth('waiter'))
-      .send({ version: 1, actualCash: 4850000, expectedCash: 4850000 })
+      .send({ version: 1, declaredCash: 4850000, expectedCash: 4850000 })
       .expect(400);
-    const closed = await close(id, 1, 4850000).expect(201);
+    const pending = await submit(id, 1, 4850000).expect(201);
+    expect(pending.body).toMatchObject({
+      status: 'PENDING_REVIEW',
+      declaredCash: 4850000,
+      declaredVariance: -200000,
+    });
+    await open().expect(409);
+    const closed = await verify(id, 2, 4950000).expect(201);
     expect(closed.body).toMatchObject({
       status: 'CLOSED',
       expectedCash: 5050000,
-      actualCash: 4850000,
-      variance: -200000,
-      closedBy: actors.waiter.id,
+      declaredCash: 4850000,
+      declaredVariance: -200000,
+      verifiedCash: 4950000,
+      verifiedVariance: -100000,
+      closedBy: actors.admin.id,
       transactionCount: 1,
     });
     expect(closed.body.transactions[0].invoiceCode).toBe(receipt.invoiceCode);
     const persisted = await shifts.findById(id).lean().orFail();
-    await close(id, 2, 5050000, 'admin').expect(409);
+    await verify(id, 3, 5050000).expect(409);
+    await submit(id, 3, 5050000).expect(409);
     await request(http())
       .patch(`/cash-shifts/${id}`)
       .set('Authorization', auth())
-      .send({ actualCash: 0 })
+      .send({ declaredCash: 0 })
       .expect(404);
     await request(http())
       .delete(`/cash-shifts/${id}`)
@@ -614,7 +885,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       outcomes.filter((result) => result.status === 'fulfilled'),
     ).toHaveLength(1);
     expect(await receipts.countDocuments({ paymentMethod: 'CASH' })).toBe(1);
-    const current = await drawer.current(actors.waiter);
+    const current = await auditedCurrent('waiter');
     expect(current).toMatchObject({
       cashSales: 8000,
       expectedCash: 58000,
@@ -623,7 +894,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     });
   });
 
-  it('close winning while CASH is in flight rolls back the entire settlement', async () => {
+  it('submit winning while CASH is in flight rolls back the entire settlement', async () => {
     const opened = await open().expect(201);
     const sale = await bill(8000);
     const entered = latch(),
@@ -649,7 +920,8 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       );
     await entered.promise;
     try {
-      await close(opened.body.id, 0, 50000).expect(201);
+      await submit(opened.body.id, 0, 50000).expect(201);
+      await verify(opened.body.id, 1, 50000).expect(201);
     } finally {
       release.resolve();
     }
@@ -668,7 +940,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     );
   });
 
-  it('CASH winning forces a concurrent close to reload before it can persist', async () => {
+  it('CASH winning forces a concurrent submit to reload before it can persist', async () => {
     const opened = await open().expect(201);
     const sale = await bill(8000);
     const entered = latch(),
@@ -689,15 +961,15 @@ describe('Settlement revenue and cash shift reconciliation', () => {
     );
     await entered.promise;
     try {
-      await close(opened.body.id, 0, 50000).expect(409);
+      await submit(opened.body.id, 0, 50000).expect(409);
     } finally {
       release.resolve();
     }
     await attempt;
-    const result = await close(opened.body.id, 1, 58000).expect(201);
+    const result = await submit(opened.body.id, 1, 58000).expect(201);
     expect(result.body).toMatchObject({
       expectedCash: 58000,
-      variance: 0,
+      declaredVariance: 0,
       transactionCount: 1,
     });
   });
@@ -749,14 +1021,14 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       transactionCount: 1,
     });
     expect(receipt.cashShiftId).toBeUndefined();
-    expect(await drawer.current(actors.waiter)).toMatchObject({
+    expect(await auditedCurrent('waiter')).toMatchObject({
       cashSales: 0,
       expectedCash: 50000,
       version: 0,
     });
   });
 
-  it('restricts revenue/reconciliation to Admin and staff to their own drawer; Admin can close another staff drawer', async () => {
+  it('restricts revenue/reconciliation to Admin and staff to their own drawer; only the owner submits and another Admin verifies', async () => {
     const opened = await open().expect(201);
     const id = opened.body.id as string;
     const sale = await bill();
@@ -785,7 +1057,7 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       .get(`/cash-shifts/${id}`)
       .set('Authorization', auth('other'))
       .expect(403);
-    await close(id, 0, 50000, 'other').expect(403);
+    await submit(id, 0, 50000, 'other').expect(403);
     await request(http())
       .get('/cash-shifts/current')
       .set('Authorization', auth('kitchen'))
@@ -818,8 +1090,14 @@ describe('Settlement revenue and cash shift reconciliation', () => {
       .set('Authorization', auth('other'))
       .send({ openingCash: 0, staffId: actors.waiter.id })
       .expect(400);
-    expect((await close(id, 0, 55000, 'admin').expect(201)).body).toMatchObject(
-      { variance: 5000, closedBy: actors.admin.id, staffId: actors.waiter.id },
-    );
+    await submit(id, 0, 55000, 'admin').expect(403);
+    await verify(id, 0, 55000).expect(409);
+    await submit(id, 0, 55000).expect(201);
+    await verify(id, 1, 55000, 'waiter').expect(403);
+    expect((await verify(id, 1, 55000).expect(201)).body).toMatchObject({
+      verifiedVariance: 5000,
+      verifiedBy: actors.admin.id,
+      staffId: actors.waiter.id,
+    });
   });
 });

@@ -154,6 +154,7 @@ export class RevenueService {
         byDay: unknown[];
         cashShiftBreakdown: {
           cashInOpenShifts: number;
+          cashInPendingReviewShifts: number;
           cashInClosedShifts: number;
           unassignedHistoricalCash: number;
         }[];
@@ -195,6 +196,15 @@ export class RevenueService {
                       ],
                     },
                   },
+                  cashInPendingReviewShifts: {
+                    $sum: {
+                      $cond: [
+                        { $eq: [{ $first: '$shift.status' }, 'PENDING_REVIEW'] },
+                        '$amount',
+                        0,
+                      ],
+                    },
+                  },
                   cashInClosedShifts: {
                     $sum: {
                       $cond: [
@@ -210,7 +220,7 @@ export class RevenueService {
                         {
                           $in: [
                             { $first: '$shift.status' },
-                            ['OPEN', 'CLOSED'],
+                            ['OPEN', 'PENDING_REVIEW', 'CLOSED'],
                           ],
                         },
                         0,
@@ -321,6 +331,7 @@ export class RevenueService {
       ...totals,
       ...(result.cashShiftBreakdown[0] ?? {
         cashInOpenShifts: 0,
+        cashInPendingReviewShifts: 0,
         cashInClosedShifts: 0,
         unassignedHistoricalCash: 0,
       }),

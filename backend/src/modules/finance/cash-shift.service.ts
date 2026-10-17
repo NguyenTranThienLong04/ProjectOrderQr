@@ -15,7 +15,7 @@ import {
 } from '../vnpay/payment-intent.schema';
 import { lifecycleTransaction } from '../session/lifecycle-transaction';
 import { CashShift, CashShiftDocument } from './cash-shift.schema';
-import { CloseShiftDto, ShiftQuery } from './finance.dto';
+import { SubmitShiftDto, VerifyShiftDto, ShiftQuery } from './finance.dto';
 import {
   completeReceiptCodes,
   RECEIPT_PAGE_SIZE,
@@ -33,9 +33,17 @@ export interface ShiftView {
   openingCash: number;
   cashSales: number;
   expectedCash: number;
+  declaredCash: number | null;
+  declaredBy: Types.ObjectId | null;
+  submittedAt: Date | null;
+  declaredVariance: number | null;
+  verifiedCash: number | null;
+  verifiedBy: Types.ObjectId | null;
+  verifiedAt: Date | null;
+  verifiedVariance: number | null;
   actualCash: number | null;
   variance: number | null;
-  status: 'OPEN' | 'CLOSED';
+  status: CashShift['status'];
   closedBy: Types.ObjectId | null;
   closedByName: string | null;
   version: number;
@@ -54,7 +62,7 @@ export class CashShiftService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Do not accept traffic until the cross-instance OPEN constraint exists.
+    // Do not accept traffic until both cross-instance active constraints exist.
     await this.shifts.createIndexes();
   }
 
@@ -74,7 +82,9 @@ export class CashShiftService implements OnModuleInit {
       return this.detail(String(shift._id), actor);
     } catch (error) {
       if ((error as { code?: number }).code === 11000)
-        throw new ConflictException('Bạn đã có ca tiền mặt đang mở');
+        throw new ConflictException(
+          'Bạn đã có ca tiền mặt đang mở hoặc chờ xác minh',
+        );
       throw error;
     }
   }
@@ -122,11 +132,19 @@ export class CashShiftService implements OnModuleInit {
           status: 1,
           actualCash: 1,
           variance: 1,
+          declaredCash: { $ifNull: ['$declaredCash', null] },
+          declaredBy: { $ifNull: ['$declaredBy', null] },
+          submittedAt: { $ifNull: ['$submittedAt', null] },
+          declaredVariance: { $ifNull: ['$declaredVariance', null] },
+          verifiedCash: { $ifNull: ['$verifiedCash', null] },
+          verifiedBy: { $ifNull: ['$verifiedBy', null] },
+          verifiedAt: { $ifNull: ['$verifiedAt', null] },
+          verifiedVariance: { $ifNull: ['$verifiedVariance', null] },
           closedBy: 1,
           closedByName: 1,
           expectedCash: {
             $cond: [
-              { $eq: ['$status', 'CLOSED'] },
+              { $ne: ['$status', 'OPEN'] },
               '$expectedCash',
               { $add: ['$openingCash', '$cashSales'] },
             ],
@@ -136,9 +154,46 @@ export class CashShiftService implements OnModuleInit {
     ];
   }
 
-  async list(query: ShiftQuery, actor?: CashActor) {
+  private blind(shift: ShiftView, actor: CashActor) {
+    return (
+      shift.status === 'OPEN' &&
+      (actor.role !== UserRole.ADMIN || String(shift.staffId) === actor.id)
+    );
+  }
+
+  private present(shift: ShiftView, actor: CashActor) {
+    const {
+      cashSales,
+      expectedCash,
+      variance,
+      declaredVariance,
+      verifiedVariance,
+      ...base
+    } = shift;
+    return {
+      ...base,
+      ...(!this.blind(shift, actor)
+        ? {
+            cashSales,
+            expectedCash,
+            variance,
+            declaredVariance,
+            verifiedVariance,
+          }
+        : {}),
+      canSubmit: shift.status === 'OPEN' && String(shift.staffId) === actor.id,
+      canVerify:
+        shift.status === 'PENDING_REVIEW' &&
+        actor.role === UserRole.ADMIN &&
+        String(shift.staffId) !== actor.id,
+    };
+  }
+
+  async list(query: ShiftQuery, actor: CashActor, ownOnly = true) {
+    if (!ownOnly && actor.role !== UserRole.ADMIN)
+      throw new ForbiddenException();
     const page = query.page ?? 1;
-    const staffId = actor?.id ?? query.staffId;
+    const staffId = ownOnly ? actor.id : query.staffId;
     const [result] = await this.shifts
       .aggregate<{ shifts: ShiftView[]; count: { total: number }[] }>([
         {
@@ -161,7 +216,7 @@ export class CashShiftService implements OnModuleInit {
       ])
       .exec();
     return {
-      shifts: result.shifts,
+      shifts: result.shifts.map((shift) => this.present(shift, actor)),
       total: result.count[0]?.total ?? 0,
       page,
       pageSize: RECEIPT_PAGE_SIZE,
@@ -169,9 +224,18 @@ export class CashShiftService implements OnModuleInit {
   }
 
   async current(actor: CashActor) {
-    return (
-      (await this.list({ status: 'OPEN', page: 1 }, actor)).shifts[0] ?? null
-    );
+    const [shift] = await this.shifts
+      .aggregate<ShiftView>([
+        {
+          $match: {
+            staffId: new Types.ObjectId(actor.id),
+            status: { $in: ['OPEN', 'PENDING_REVIEW'] },
+          },
+        },
+        ...this.view(),
+      ])
+      .exec();
+    return shift ? this.present(shift, actor) : null;
   }
 
   async detail(id: string, actor: CashActor, page = 1) {
@@ -184,6 +248,14 @@ export class CashShiftService implements OnModuleInit {
     if (!shift) throw new NotFoundException('Không tìm thấy ca tiền mặt');
     if (actor.role !== UserRole.ADMIN && String(shift.staffId) !== actor.id)
       throw new ForbiddenException('Bạn chỉ được xem ca của mình');
+    // Receipt amounts would let the collector reconstruct the blind total.
+    if (this.blind(shift, actor))
+      return {
+        ...this.present(shift, actor),
+        transactions: [],
+        page,
+        pageSize: RECEIPT_PAGE_SIZE,
+      };
     const transactions = await this.receipts
       .aggregate<ReceiptRow>([
         {
@@ -200,26 +272,29 @@ export class CashShiftService implements OnModuleInit {
       ])
       .exec();
     await completeReceiptCodes(this.receipts, transactions);
-    return { ...shift, transactions, page, pageSize: RECEIPT_PAGE_SIZE };
+    return {
+      ...this.present(shift, actor),
+      transactions,
+      page,
+      pageSize: RECEIPT_PAGE_SIZE,
+    };
   }
 
-  async close(id: string, input: CloseShiftDto, actor: CashActor) {
-    const closer = await this.users
-      .findById(actor.id)
-      .select('fullName')
-      .lean()
-      .exec();
-    if (!closer) throw new ForbiddenException();
+  async submit(id: string, input: SubmitShiftDto, actor: CashActor) {
+    if (![UserRole.ADMIN, UserRole.WAITER].includes(actor.role))
+      throw new ForbiddenException();
     await lifecycleTransaction(this.connection, async (session) => {
       const shift = await this.shifts.findById(id).session(session).exec();
       if (!shift) throw new NotFoundException('Không tìm thấy ca tiền mặt');
-      if (actor.role !== UserRole.ADMIN && String(shift.staffId) !== actor.id)
-        throw new ForbiddenException('Bạn chỉ được đóng ca của mình');
+      if (String(shift.staffId) !== actor.id)
+        throw new ForbiddenException('Bạn chỉ được gửi đối soát ca của mình');
       if (shift.status !== 'OPEN')
-        throw new ConflictException('Ca đã đóng; kết quả được giữ nguyên');
-      // A settlement and close must both write this same document in their
-      // transaction. A stale preview/write conflict returns 409, never silently
-      // closes over receipts the operator has not seen.
+        throw new ConflictException(
+          'Ca đã gửi đối soát; kê khai được giữ nguyên',
+        );
+      // Settlement and submission write the same document in their transaction.
+      // A competing receipt requires reloading and counting again, never retrying
+      // the declaration silently against a newer snapshot.
       const locked = await this.shifts
         .updateOne(
           { _id: shift._id, status: 'OPEN', version: input.version },
@@ -229,7 +304,7 @@ export class CashShiftService implements OnModuleInit {
         .exec();
       if (locked.modifiedCount !== 1)
         throw new ConflictException(
-          'Ca vừa có thay đổi; tải lại số tiền trước khi đóng',
+          'Ca vừa có thay đổi; tải lại và kiểm đếm trước khi gửi đối soát',
         );
       const [sales] = await this.receipts
         .aggregate<{ amount: number }>([
@@ -247,23 +322,77 @@ export class CashShiftService implements OnModuleInit {
       const expectedCash = shift.openingCash + (sales?.amount ?? 0);
       if (!Number.isSafeInteger(expectedCash))
         throw new ConflictException('Số tiền vượt giới hạn tính toán');
-      await this.shifts
+      const submitted = await this.shifts
         .updateOne(
           { _id: shift._id, status: 'OPEN', version: input.version + 1 },
           {
             $set: {
-              status: 'CLOSED',
-              closedAt: new Date(),
-              closedBy: actor.id,
-              closedByName: closer.fullName,
+              status: 'PENDING_REVIEW',
+              submittedAt: new Date(),
+              declaredBy: actor.id,
               expectedCash,
-              actualCash: input.actualCash,
-              variance: input.actualCash - expectedCash,
+              declaredCash: input.declaredCash,
+              declaredVariance: input.declaredCash - expectedCash,
             },
           },
           { session },
         )
         .exec();
+      if (submitted.modifiedCount !== 1)
+        throw new ConflictException('Ca vừa có thay đổi');
+    });
+    return this.detail(id, actor);
+  }
+
+  async verify(id: string, input: VerifyShiftDto, actor: CashActor) {
+    if (actor.role !== UserRole.ADMIN)
+      throw new ForbiddenException('Chỉ Admin được xác minh ca');
+    const verifier = await this.users
+      .findById(actor.id)
+      .select('fullName')
+      .lean()
+      .exec();
+    if (!verifier) throw new ForbiddenException();
+    await lifecycleTransaction(this.connection, async (session) => {
+      const shift = await this.shifts.findById(id).session(session).exec();
+      if (!shift) throw new NotFoundException('Không tìm thấy ca tiền mặt');
+      if (String(shift.staffId) === actor.id)
+        throw new ForbiddenException(
+          'Ca của Admin phải được một Admin khác xác minh',
+        );
+      if (shift.status !== 'PENDING_REVIEW')
+        throw new ConflictException(
+          'Chỉ xác minh ca đang chờ; ca đã đóng không thể sửa',
+        );
+      if (
+        shift.expectedCash === null ||
+        !Number.isSafeInteger(shift.expectedCash)
+      )
+        throw new ConflictException('Ca chưa có số tiền dự kiến hợp lệ');
+      const now = new Date();
+      const verified = await this.shifts
+        .updateOne(
+          { _id: shift._id, status: 'PENDING_REVIEW', version: input.version },
+          {
+            $inc: { version: 1 },
+            $set: {
+              status: 'CLOSED',
+              verifiedCash: input.verifiedCash,
+              verifiedVariance: input.verifiedCash - shift.expectedCash,
+              verifiedBy: actor.id,
+              verifiedAt: now,
+              closedAt: now,
+              closedBy: actor.id,
+              closedByName: verifier.fullName,
+            },
+          },
+          { session },
+        )
+        .exec();
+      if (verified.modifiedCount !== 1)
+        throw new ConflictException(
+          'Ca vừa có thay đổi; tải lại trước khi xác minh',
+        );
     });
     return this.detail(id, actor);
   }

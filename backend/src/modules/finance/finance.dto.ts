@@ -38,8 +38,8 @@ export class RevenueQuery extends PageQuery {
 
 export class ShiftQuery extends PageQuery {
   @IsOptional()
-  @IsIn(['OPEN', 'CLOSED'])
-  status?: 'OPEN' | 'CLOSED';
+  @IsIn(['OPEN', 'PENDING_REVIEW', 'CLOSED'])
+  status?: 'OPEN' | 'PENDING_REVIEW' | 'CLOSED';
 
   @IsOptional()
   @IsMongoId()
@@ -58,14 +58,27 @@ export class OpenShiftDto {
   openingCash!: number;
 }
 
-export class CloseShiftDto {
+export class SubmitShiftDto {
   @IsInt()
   @Min(0)
   @Max(Number.MAX_SAFE_INTEGER)
-  actualCash!: number;
+  declaredCash!: number;
 
-  // Supplied by the UI from the preview; never a user-entered cash amount.
+  // Opaque concurrency token; the blind count response contains no cash totals.
   @IsInt()
   @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
+  version!: number;
+}
+
+export class VerifyShiftDto {
+  @IsInt()
+  @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
+  verifiedCash!: number;
+
+  @IsInt()
+  @Min(0)
+  @Max(Number.MAX_SAFE_INTEGER)
   version!: number;
 }

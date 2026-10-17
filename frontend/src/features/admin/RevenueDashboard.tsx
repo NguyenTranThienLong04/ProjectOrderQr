@@ -231,9 +231,10 @@ export function RevenueDashboard() {
             aria-label="CASH theo ca"
           >
             <h2 className="text-lg font-bold">CASH theo ca</h2>
-            <dl className="grid gap-4 sm:grid-cols-3">
+            <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
               {[
                 ["CASH trong ca OPEN", data.cashInOpenShifts],
+                ["CASH trong ca PENDING_REVIEW", data.cashInPendingReviewShifts ?? 0],
                 ["CASH trong ca CLOSED", data.cashInClosedShifts],
                 ["Unassigned / Historical CASH", data.unassignedHistoricalCash],
               ].map(([label, amount]) => (
