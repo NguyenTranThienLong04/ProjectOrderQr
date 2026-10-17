@@ -29,6 +29,8 @@
     "test:ai-demo": "jest --config ./scripts/ai-demo/jest.json --runInBand",
     "seed:admin": "ts-node scripts/seed-admin.ts",
     "seed:merge-test": "ts-node scripts/seed-merge-test.ts",
+    "migrate:payment-intents": "ts-node scripts/migrate-payment-intents.ts",
+    "reconcile:provider-rejections": "ts-node scripts/reconcile-provider-rejections.ts",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
     "test:unit": "jest --config ./test/jest-unit.cjs --runInBand",
     "test:unit:ci": "jest --config ./test/jest-unit-ci.cjs --runInBand",

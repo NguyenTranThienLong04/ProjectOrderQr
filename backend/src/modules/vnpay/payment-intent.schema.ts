@@ -6,10 +6,15 @@ export enum PaymentIntentStatus {
   PENDING = 'pending',
   SUCCEEDED = 'succeeded',
   FAILED = 'failed',
+  /** Operator-verified rejection before a provider payment was created; not an IPN. */
+  PROVIDER_REJECTED = 'provider_rejected',
 }
 
 // Older versions also wrote FAILED on local expiry/browser return. Those
 // records remain unresolved until a verified server callback confirms them.
+// Reconciliation uses the distinct terminal PROVIDER_REJECTED state, never a
+// fabricated ipnConfirmed flag. Keep this predicate/index definition unchanged:
+// both existing unique partial indexes already exclude terminal states.
 export const UNRESOLVED_PAYMENT_FILTER = {
   $or: [
     { status: PaymentIntentStatus.PENDING },
@@ -55,6 +60,25 @@ export class PaymentIntent {
 
   @Prop({ default: false })
   ipnConfirmed!: boolean;
+
+  @Prop({ type: String, enum: ['reconciliation'] })
+  resolutionSource?: 'reconciliation';
+
+  /** Gateway rejection code, distinct from an IPN responseCode. */
+  @Prop({ trim: true })
+  providerCode?: string;
+
+  @Prop({ type: String, enum: ['terminal_not_approved'] })
+  resolutionReason?: 'terminal_not_approved';
+
+  @Prop({ type: Date })
+  resolvedAt?: Date;
+
+  @Prop({ trim: true })
+  reconciliationNote?: string;
+
+  @Prop({ match: /^[a-f0-9]{64}$/ })
+  reconciliationEvidenceSha256?: string;
 
   /** Reused while this intent is pending, so concurrent clicks cannot charge twice. */
   @Prop({ required: true, trim: true })

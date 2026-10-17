@@ -90,7 +90,26 @@ export class VnpayService implements OnModuleInit {
   async onModuleInit() {
     // Never accept checkout traffic before the cross-instance constraints exist.
     // Existing ambiguous overlaps must be resolved before these indexes can build.
-    await this.paymentIntentModel.createIndexes();
+    try {
+      await this.paymentIntentModel.createIndexes();
+    } catch (error) {
+      const failure = error as {
+        code?: number;
+        keyPattern?: Record<string, unknown>;
+      };
+      const index = failure.keyPattern?.sessionId
+        ? 'one_unresolved_checkout_per_session'
+        : failure.keyPattern?.coveredOrderIds
+          ? 'one_unresolved_checkout_per_order'
+          : 'PaymentIntent schema indexes';
+      const message =
+        `Cannot initialize payment_intents index ${index} (MongoDB code ${failure.code ?? 'unknown'}). ` +
+        'Checkout remains unavailable. Run npm run migrate:payment-intents -- --help, ' +
+        'back up and reconcile legacy unresolved payments before restarting; do not remove the uniqueness constraints.';
+      this.logger.error(message);
+      // Do not leak a driver message/URI or let checkout start without constraints.
+      throw new Error(message);
+    }
   }
 
   private getRequiredConfig(key: string): string {
@@ -590,9 +609,11 @@ export class VnpayService implements OnModuleInit {
   async getPaymentStatus(txnRef: string, sessionId: string, tableId: string) {
     const intent = await this.findOwnedIntent(txnRef, sessionId, tableId);
     const status =
-      intent.status === PaymentIntentStatus.FAILED && !intent.ipnConfirmed
-        ? PaymentIntentStatus.PENDING
-        : intent.status;
+      intent.status === PaymentIntentStatus.PROVIDER_REJECTED
+        ? PaymentIntentStatus.FAILED
+        : intent.status === PaymentIntentStatus.FAILED && !intent.ipnConfirmed
+          ? PaymentIntentStatus.PENDING
+          : intent.status;
     return {
       invoiceCode:
         intent.status === PaymentIntentStatus.SUCCEEDED
@@ -681,6 +702,19 @@ export class VnpayService implements OnModuleInit {
             receivedAmount !== intent.amount * 100
           )
             return { response: { RspCode: '04', Message: 'Invalid amount' } };
+          // A receipt after a verified pre-transaction rejection contradicts the
+          // reconciliation. Preserve history/Orders and require operator review.
+          if (intent.status === PaymentIntentStatus.PROVIDER_REJECTED) {
+            this.logger.warn(
+              `Provider result conflicts with reconciliation for ${intent.txnRef}`,
+            );
+            return {
+              response: {
+                RspCode: '99',
+                Message: 'Conflicting provider result',
+              },
+            };
+          }
           if (
             intent.status === PaymentIntentStatus.SUCCEEDED ||
             intent.ipnConfirmed

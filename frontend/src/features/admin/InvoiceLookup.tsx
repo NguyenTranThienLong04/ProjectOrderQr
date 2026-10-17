@@ -7,7 +7,7 @@ import { invoiceApi, invoiceCodePattern } from '../../services/api/invoice';
 import type { InvoiceDetail } from '../../services/api/invoice';
 
 const money = (amount: number) => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
-const paymentLabels = { pending: 'Chờ xác nhận thanh toán', succeeded: 'Đã thanh toán', failed: 'Thanh toán không thành công' };
+const paymentLabels = { pending: 'Chờ xác nhận thanh toán', succeeded: 'Đã thanh toán', failed: 'Thanh toán không thành công', provider_rejected: 'Cổng thanh toán từ chối' };
 type SearchState = 'idle' | 'loading' | 'invalid' | 'not-found' | 'success' | 'error';
 const messages = {
   invalid: 'Mã hóa đơn không hợp lệ. Nhập theo mẫu INV-20260910-K7P4X2M9.',

@@ -17,11 +17,19 @@ import {
   UNRESOLVED_PAYMENT_FILTER,
 } from './payment-intent.schema';
 import { VnpayService } from './vnpay.service';
+import { mkdtemp, readdir, unlink, rmdir } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  reconcileProviderRejections,
+  type ProviderRejectionEvidence,
+} from '../../../scripts/reconcile-provider-rejections';
 
 // Database lifecycle is owned by the shared integration harness.
 
 describe('Payment correctness (isolated replica set)', () => {
   const connections: Connection[] = [];
+  const backupDirectories: string[] = [];
   let first: ReturnType<typeof instance>;
   let second: ReturnType<typeof instance>;
   let sessionId: Types.ObjectId;
@@ -107,6 +115,13 @@ describe('Payment correctness (isolated replica set)', () => {
     });
   });
 
+  afterEach(async () => {
+    for (const directory of backupDirectories.splice(0)) {
+      for (const name of await readdir(directory)) await unlink(join(directory, name));
+      await rmdir(directory);
+    }
+  });
+
   function seed(amount = 10000, status = OrderStatus.SERVED) {
     return first.orders.create({
       sessionId,
@@ -149,6 +164,118 @@ describe('Payment correctness (isolated replica set)', () => {
     params.vnp_SecureHash = (first.service as any).sign(params);
     return params;
   };
+
+  async function rejectedCheckoutFixture() {
+    const order = await seed();
+    const payment = await checkout();
+    const createdAt = new Date(Date.now() - 2 * 3600000);
+    const expiresAt = new Date(createdAt.getTime() + 15 * 60000);
+    const paymentUrl = (first.service as any).providerPaymentUrl(
+      payment.txnRef, sessionId.toString(), payment.amount, '127.0.0.1', createdAt, expiresAt,
+    );
+    await first.intents.collection.updateOne({ txnRef: payment.txnRef }, {
+      $set: { createdAt, expiresAt, paymentUrl },
+    });
+    const createDate = new URL(paymentUrl).searchParams.get('vnp_CreateDate')!;
+    const evidence: ProviderRejectionEvidence = {
+      source: 'operator-verified-vnpay-sandbox-portal',
+      confirmedAt: new Date().toISOString(),
+      operatorNote: 'Isolated fixture: operator verified gateway 71 and no matching portal transaction.',
+      tmnCode: 'TESTCODE', merchantWebsite: 'example.com',
+      smartOrderWebsite: 'https://app.example.com',
+      returnUrl: configValues.VNP_RETURN_URL,
+      portalUrl: 'https://sandbox.vnpayment.vn/merchantv2/',
+      searchDate: `${createDate.slice(0, 4)}-${createDate.slice(4, 6)}-${createDate.slice(6, 8)}`,
+      gatewayCode: '71',
+      payments: [{
+        txnRef: payment.txnRef, sessionId: String(sessionId), amount: payment.amount,
+        coveredOrderIds: [order.id], createDate, portalResult: 'not_found',
+      }],
+    };
+    const directory = await mkdtemp(join(tmpdir(), 'vnpay-reconciliation-test-'));
+    backupDirectories.push(directory);
+    const options = {
+      evidence, tmnCode: 'TESTCODE', hashSecret: configValues.VNP_HASH_SECRET,
+      backupDirectory: directory,
+    };
+    const run = (apply = true) => reconcileProviderRejections(
+      connections[0].getClient(), connections[0].db!, { ...options, apply },
+    );
+    return { order, payment, evidence, run };
+  }
+
+  test('operator reconciliation of code 71 releases an expired checkout without an IPN; history and unique indexes remain', async () => {
+    // The fixture uses HTTPS just like the production-only reconciliation helper.
+    const originalReturn = configValues.VNP_RETURN_URL;
+    configValues.VNP_RETURN_URL = 'https://backend.example.com/vnpay/return';
+    try {
+      const { order, payment, run } = await rejectedCheckoutFixture();
+      const paid = await seed(5000, OrderStatus.PAID);
+      const previous = await first.intents.create({
+        txnRef: 'previous-success', coverageKey: 'previous-success', sessionId, tableId,
+        coveredOrderIds: [paid._id], amount: 5000, status: PaymentIntentStatus.SUCCEEDED,
+        ipnConfirmed: true, paymentUrl: 'history', expiresAt: new Date(), transactionNo: '987',
+      });
+      const preserved = await first.intents.findById(previous._id).lean();
+      const originalOrder = await first.orders.findById(order._id).lean();
+      const indexes = await first.intents.collection.listIndexes().toArray();
+      await expect(checkout()).rejects.toThrow(ConflictException);
+      expect(await run(false)).toMatchObject({ mode: 'dry-run', documentsToUpdate: 1 });
+      expect((await first.intents.findOne({ txnRef: payment.txnRef }))!.status).toBe('pending');
+      expect(await run()).toMatchObject({ documentsToUpdate: 1, ipnConfirmedWritten: false, ordersWritten: 0, indexChanges: 0 });
+      expect(await first.intents.findOne({ txnRef: payment.txnRef }).lean()).toMatchObject({
+        status: 'provider_rejected', ipnConfirmed: false, resolutionSource: 'reconciliation',
+        providerCode: '71', resolutionReason: 'terminal_not_approved', resolvedAt: expect.any(Date),
+      });
+      expect(await first.intents.findById(previous._id).lean()).toEqual(preserved);
+      expect(await first.orders.findById(order._id).lean()).toEqual(originalOrder);
+      expect(await first.intents.collection.listIndexes().toArray()).toEqual(indexes);
+      expect(await first.service.getPaymentStatus(payment.txnRef, String(sessionId), String(tableId)))
+        .toMatchObject({ status: 'failed' });
+      const [a, b] = await Promise.all([checkout(), checkout(second)]);
+      expect(a.txnRef).toBe(b.txnRef);
+      expect(a.txnRef).not.toBe(payment.txnRef);
+      expect(await first.intents.countDocuments(UNRESOLVED_PAYMENT_FILTER)).toBe(1);
+      const fresh = (await first.intents.findOne({ txnRef: a.txnRef }).lean())!;
+      const { _id, invoiceCode, ...duplicate } = fresh;
+      await expect(first.intents.collection.insertOne({ ...duplicate, txnRef: 'duplicate-session', coverageKey: 'other-key', coveredOrderIds: [new Types.ObjectId()] }))
+        .rejects.toMatchObject({ code: 11000, keyPattern: { sessionId: 1 } });
+      await expect(first.intents.collection.insertOne({ ...duplicate, txnRef: 'duplicate-order', coverageKey: 'other-key', sessionId: new Types.ObjectId() }))
+        .rejects.toMatchObject({ code: 11000, keyPattern: { coveredOrderIds: 1 } });
+      expect(await run()).toMatchObject({ documentsToUpdate: 0 });
+      // Contradictory late receipts cannot mark Orders Paid or overwrite reconciliation.
+      const beforeLateReceipt = await first.orders.findById(order._id).lean();
+      expect(await first.service.handleIpn(signed(payment))).toMatchObject({ RspCode: '99' });
+      expect(await first.orders.findById(order._id).lean()).toEqual(beforeLateReceipt);
+      expect(await first.intents.countDocuments({})).toBe(3);
+    } finally { configValues.VNP_RETURN_URL = originalReturn; }
+  });
+
+  test('gateway error alone, incomplete portal evidence, mismatched amounts and succeeded targets cannot be reconciled', async () => {
+    const originalReturn = configValues.VNP_RETURN_URL;
+    configValues.VNP_RETURN_URL = 'https://backend.example.com/vnpay/return';
+    try {
+      const { payment, evidence, run } = await rejectedCheckoutFixture();
+      const note = evidence.operatorNote;
+      evidence.operatorNote = '';
+      await expect(run()).rejects.toThrow('evidence');
+      evidence.operatorNote = note;
+      evidence.payments[0].amount += 1;
+      await expect(run()).rejects.toThrow('match');
+      evidence.payments[0].amount -= 1;
+      await first.intents.collection.updateOne({ txnRef: payment.txnRef }, {
+        $set: { status: 'failed', providerCode: '71', resolutionSource: 'reconciliation' },
+      });
+      expect(await first.intents.countDocuments(UNRESOLVED_PAYMENT_FILTER)).toBe(1);
+      await expect(checkout()).rejects.toThrow(ConflictException);
+      await expect(run()).rejects.toThrow('conflicting evidence');
+      await first.intents.collection.updateOne({ txnRef: payment.txnRef }, {
+        $set: { status: 'succeeded', ipnConfirmed: true },
+      });
+      await expect(run()).rejects.toThrow('conflicting evidence');
+      expect((await first.intents.findOne({ txnRef: payment.txnRef }))!.status).toBe('succeeded');
+    } finally { configValues.VNP_RETURN_URL = originalReturn; }
+  });
 
   test('concurrent snapshots A and A+B converge; overlap stays blocked even after session reassignment', async () => {
     const orderA = await seed();

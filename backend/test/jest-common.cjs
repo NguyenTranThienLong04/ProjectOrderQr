@@ -5,6 +5,7 @@ const integrationTests = [
   'src/modules/session/session.lifecycle.spec.ts',
   'src/modules/vnpay/vnpay.transaction.spec.ts',
   'test/mongo-isolation.integration.spec.ts',
+  'test/payment-intent-migration.integration.spec.ts',
 ];
 
 const base = {
