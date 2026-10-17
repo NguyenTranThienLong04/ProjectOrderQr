@@ -1,10 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import type { FormEvent } from 'react';
 import { isAxiosError } from 'axios';
 import { Download, Search } from 'lucide-react';
 import { Feedback, PageHeader, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 import { invoiceApi, invoiceCodePattern } from '../../services/api/invoice';
-import type { InvoiceDetail } from '../../services/api/invoice';
+import type { InvoiceDetail, RecentCashInvoice } from '../../services/api/invoice';
 
 const money = (amount: number) => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
 const paymentLabels = { pending: 'Chờ xác nhận thanh toán', succeeded: 'Đã thanh toán', failed: 'Thanh toán không thành công', provider_rejected: 'Cổng thanh toán từ chối', superseded: 'Đã thay thế bằng thanh toán tiền mặt' };
@@ -16,16 +17,35 @@ const messages = {
 };
 
 export function InvoiceLookup() {
-  const [input, setInput] = useState('');
+  const [params, setParams] = useSearchParams();
+  const selectedCode = params.get('invoiceCode') ?? '';
+  const [input, setInput] = useState(selectedCode);
   const [state, setState] = useState<SearchState>('idle');
   const [invoice, setInvoice] = useState<InvoiceDetail>();
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const [recent, setRecent] = useState<RecentCashInvoice[]>([]);
+  const [recentError, setRecentError] = useState('');
+  const requestId = useRef(0);
 
-  async function search(event: FormEvent) {
-    event.preventDefault();
-    const code = input.trim().toUpperCase();
+  useEffect(() => {
+    let active = true;
+    void invoiceApi.recentCash().then((receipts) => { if (active) setRecent(receipts); })
+      .catch(() => { if (active) setRecentError('Chưa thể tải hóa đơn tiền mặt gần đây. Bạn vẫn có thể tra cứu bằng mã.'); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    if (selectedCode) void lookup(selectedCode, controller.signal);
+    else { requestId.current++; setInput(''); setInvoice(undefined); setState('idle'); }
+    return () => controller.abort();
+  }, [selectedCode]);
+
+  async function lookup(value: string, signal?: AbortSignal) {
+    const id = ++requestId.current;
+    const code = value.trim().toUpperCase();
     setInput(code);
     setInvoice(undefined);
     setDownloadError('');
@@ -36,12 +56,22 @@ export function InvoiceLookup() {
     }
     setState('loading');
     try {
-      setInvoice(await invoiceApi.lookup(code));
+      const result = await invoiceApi.lookup(code, signal);
+      if (signal?.aborted || id !== requestId.current) return;
+      setInvoice(result);
       setState('success');
     } catch (error) {
+      if (signal?.aborted || id !== requestId.current) return;
       const status = isAxiosError(error) ? error.response?.status : undefined;
       setState(status === 404 ? 'not-found' : status === 400 ? 'invalid' : 'error');
     }
+  }
+
+  function search(event: FormEvent) {
+    event.preventDefault();
+    const code = input.trim().toUpperCase();
+    if (!invoiceCodePattern.test(code) || code === selectedCode) void lookup(code);
+    else setParams({ invoiceCode: code });
   }
 
   async function download() {
@@ -75,7 +105,8 @@ export function InvoiceLookup() {
         <div><dt className="text-slate-600">Trạng thái thanh toán</dt><dd className="mt-1 font-semibold">{paymentLabels[invoice.paymentStatus]}</dd></div>
         <div><dt className="text-slate-600">Bàn</dt><dd className="mt-1 font-semibold">{invoice.table.displayName}</dd></div>
         <div><dt className="text-slate-600">Thời gian thanh toán</dt><dd className="mt-1 font-semibold">{invoice.paidAt ? new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(invoice.paidAt)) : 'Chưa ghi nhận thanh toán'}</dd></div>
-        {invoice.vnpTransactionNo && <div><dt className="text-slate-600">Mã VNPAY</dt><dd className="mt-1 break-words font-semibold">{invoice.vnpTransactionNo}</dd></div>}
+        {invoice.settledByName && <div><dt className="text-slate-600">Nhân viên xác nhận</dt><dd className="mt-1 font-semibold">{invoice.settledByName}</dd></div>}
+        {invoice.paymentMethod !== 'CASH' && invoice.vnpTransactionNo && <div><dt className="text-slate-600">Mã VNPAY</dt><dd className="mt-1 break-words font-semibold">{invoice.vnpTransactionNo}</dd></div>}
       </dl>
       <InvoiceRounds invoice={invoice} />
       <dl className="space-y-2 border-t border-slate-200 pt-4 text-sm">
@@ -84,8 +115,20 @@ export function InvoiceLookup() {
         <div className="flex justify-between gap-4 text-lg font-bold"><dt>Tổng thanh toán</dt><dd>{money(invoice.totalAmount)}</dd></div>
       </dl>
       {invoice.paymentStatus === 'succeeded' && <button onClick={() => void download()} disabled={downloading} className={secondaryButtonClass}><Download aria-hidden="true" className="h-4 w-4" />{downloading ? 'Đang tải PDF…' : 'Tải lại PDF'}</button>}
+      {invoice.paymentStatus === 'succeeded' && <p className="text-sm text-slate-600">Mở PDF đã tải để xem hoặc in hóa đơn.</p>}
       {downloadError && <Feedback tone="danger">{downloadError}</Feedback>}
     </section>}
+    <section aria-label="Hóa đơn tiền mặt gần đây" className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
+      <h2 className="text-lg font-bold text-slate-950">Hóa đơn tiền mặt gần đây</h2>
+      <p className="text-sm text-slate-600">20 hóa đơn gần nhất. Với hóa đơn cũ hơn, nhập mã để tra cứu.</p>
+      {recentError && <Feedback tone="warning">{recentError}</Feedback>}
+      <ul className="divide-y divide-slate-200">{recent.map((receipt) => <li key={receipt.invoiceCode}>
+        <Link to={`?invoiceCode=${encodeURIComponent(receipt.invoiceCode)}`} className="flex min-h-11 flex-wrap items-center justify-between gap-2 rounded-lg py-3 text-sm hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-brand-600">
+          <span className="min-w-0"><span className="block break-words font-semibold text-brand-700">{receipt.invoiceCode}</span><span className="text-slate-600">Bàn {receipt.table.displayName}{receipt.paidAt ? ` · ${new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(receipt.paidAt))}` : ''}</span></span>
+          <span className="font-semibold">{money(receipt.amount)}</span>
+        </Link>
+      </li>)}</ul>
+    </section>
   </div>;
 }
 
@@ -100,6 +143,7 @@ export function InvoiceRounds({ invoice }: { invoice: InvoiceDetail }) {
         <p className="mt-1 text-slate-600">Đơn giá: {money(item.unitPrice)}</p>
         {item.note && <p className="mt-1 break-words text-slate-600">Ghi chú: {item.note}</p>}
       </li>)}</ul>
+      {order.discountAmount > 0 && <p className="text-right text-sm text-slate-600">Giảm giá{order.promotionCode ? ` (${order.promotionCode})` : ''}: −{money(order.discountAmount)}</p>}
       <p className="text-right text-sm font-semibold">Thành tiền lượt này: {money(order.totalAmount)}</p>
     </section>)}</div>
   </details>;

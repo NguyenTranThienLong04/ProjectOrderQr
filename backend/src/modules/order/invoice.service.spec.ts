@@ -79,6 +79,42 @@ describe('InvoiceService PDF content', () => {
       'Mã VNPAY',
     );
   });
+  it('renders CASH with staff, paidAt, promotions and excluded items in the same PDF template', async () => {
+    const text = jest.spyOn(PDFDocument.prototype, 'text');
+    const pdf = await new InvoiceService().renderDetail({
+      ...invoice,
+      paymentMethod: 'CASH',
+      settledByName: 'Nguyễn An',
+      orders: invoice.orders.map((order) => ({
+        ...order,
+        promotionCode: order.discountAmount ? 'SAVE50' : undefined,
+        items: [
+          ...order.items,
+          {
+            name: 'Món hết',
+            unitPrice: 90000,
+            quantity: 1,
+            status: 'Rejected',
+            rejectionReason: 'Hết nguyên liệu',
+          },
+        ],
+      })),
+    });
+    const visible = text.mock.calls.map((call) => call[0]).join('\n');
+    expect(pdf.subarray(0, 4).toString()).toBe('%PDF');
+    for (const expected of [
+      invoice.invoiceCode,
+      'Tiền mặt (CASH)',
+      'Nguyễn An',
+      '10/9/26',
+      'SAVE50',
+      'Không tính tiền',
+      'Hết nguyên liệu',
+      'Tổng thanh toán: 300.000',
+    ])
+      expect(visible).toContain(expected);
+    expect(visible).not.toMatch(/VNPAY|txnRef|12345678/);
+  });
   it('prints rejected item, original value and reason as excluded from the charge in both PDF paths', async () => {
     const text = jest.spyOn(PDFDocument.prototype, 'text');
     const rejected = {

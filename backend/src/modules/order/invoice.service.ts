@@ -113,7 +113,9 @@ export class InvoiceService {
     document.text(
       `Thời gian: ${invoice.paidAt ? this.formatDate(invoice.paidAt) : 'Chưa có thông tin'}`,
     );
-    if (invoice.vnpTransactionNo)
+    if (invoice.settledByName)
+      document.text(`Nhân viên xác nhận: ${invoice.settledByName}`);
+    if (invoice.paymentMethod !== 'CASH' && invoice.vnpTransactionNo)
       document.text(`Mã VNPAY: ${invoice.vnpTransactionNo}`);
 
     invoice.orders.forEach((order) => {
@@ -142,6 +144,13 @@ export class InvoiceService {
             .fillColor('#000000');
         }
       }
+      if (order.discountAmount > 0 && order.promotionCode)
+        document
+          .fontSize(10)
+          .text(
+            `Giảm giá (${order.promotionCode}): -${currency.format(order.discountAmount)}`,
+            { align: 'right' },
+          );
       document
         .fontSize(10)
         .fillColor('#555555')

@@ -60,10 +60,16 @@ export interface CashSettlementSummary extends SessionPaymentSummary {
   confirmationKey: string;
 }
 
+export interface CashSettlementReceipt {
+  invoiceCode: string;
+  amount: number;
+  paymentMethod: 'CASH';
+}
+
 export const paymentApi = {
   getCashSettlementSummary: async (tableId: string): Promise<CashSettlementSummary> =>
     (await axiosClient.get(`/payments/tables/${tableId}/cash-settlement`)).data,
-  settleCash: async (tableId: string, sessionId: string, sessionVersion: number, confirmationKey: string): Promise<{ invoiceCode: string; amount: number; paymentMethod: 'CASH' }> =>
+  settleCash: async (tableId: string, sessionId: string, sessionVersion: number, confirmationKey: string): Promise<CashSettlementReceipt> =>
     (await axiosClient.post(`/payments/tables/${tableId}/cash-settlement`, { sessionId, sessionVersion, confirmationKey })).data,
   getSessionSummary: async (
     sessionId: string,

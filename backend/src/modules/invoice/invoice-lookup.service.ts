@@ -13,6 +13,7 @@ import { Order, OrderDocument } from '../order/order.schema';
 import { InvoiceService } from '../order/invoice.service';
 import { Session, SessionDocument } from '../session/session.schema';
 import { Table, TableDocument } from '../table/table.schema';
+import { User, UserDocument } from '../user/user.schema';
 import {
   PaymentIntent,
   PaymentIntentDocument,
@@ -36,6 +37,7 @@ export class InvoiceLookupService implements OnModuleInit {
     private readonly sessions: Model<SessionDocument>,
     @InjectModel(Table.name) private readonly tables: Model<TableDocument>,
     private readonly pdf: InvoiceService,
+    @InjectModel(User.name) private readonly users?: Model<UserDocument>,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -57,6 +59,33 @@ export class InvoiceLookupService implements OnModuleInit {
     const intent = await this.intents.findOne({ invoiceCode }).exec();
     if (!intent) throw new NotFoundException('Không tìm thấy hóa đơn');
     return this.detail(intent);
+  }
+
+  async recentCash() {
+    const receipts = await this.intents
+      .find({ paymentMethod: 'CASH', status: PaymentIntentStatus.SUCCEEDED })
+      .sort({ completedAt: -1, _id: -1 })
+      .limit(20)
+      .select('invoiceCode amount completedAt tableId')
+      .lean()
+      .exec();
+    const tables = await this.tables
+      .find({ _id: { $in: receipts.map((receipt) => receipt.tableId) } })
+      .select('tableCode')
+      .lean()
+      .exec();
+    const names = new Map(
+      tables.map((table) => [String(table._id), table.tableCode]),
+    );
+    return receipts.map((receipt) => ({
+      invoiceCode: receipt.invoiceCode,
+      amount: receipt.amount,
+      paidAt: receipt.completedAt,
+      table: {
+        displayName:
+          names.get(String(receipt.tableId)) ?? 'Không còn thông tin bàn',
+      },
+    }));
   }
 
   async detail(intent: PaymentIntentDocument): Promise<InvoiceDetailDto> {
@@ -98,6 +127,7 @@ export class InvoiceLookupService implements OnModuleInit {
           (order.subtotalAmount || order.totalAmount) - order.totalAmount,
         ),
       totalAmount: order.totalAmount,
+      promotionCode: order.promotionCode,
     }));
     const totalAmount = rounds.reduce(
       (sum, order) => sum + order.totalAmount,
@@ -107,6 +137,13 @@ export class InvoiceLookupService implements OnModuleInit {
       throw new ConflictException(
         'Số tiền hóa đơn không khớp snapshot thanh toán',
       );
+    const settledBy =
+      intent.paymentMethod === 'CASH' && intent.settledByUserId
+        ? await this.users
+            ?.findById(intent.settledByUserId)
+            .select('fullName')
+            .exec()
+        : null;
     return {
       invoiceCode: await ensureInvoiceCode(this.intents, intent),
       paymentStatus: intent.status,
@@ -124,6 +161,7 @@ export class InvoiceLookupService implements OnModuleInit {
         intent.status === PaymentIntentStatus.SUCCEEDED
           ? (intent.completedAt ?? intent.updatedAt ?? null)
           : null,
+      settledByName: settledBy?.fullName,
       table: {
         displayName:
           tables
@@ -131,7 +169,8 @@ export class InvoiceLookupService implements OnModuleInit {
             .sort()
             .join(' + ') || 'Không còn thông tin bàn',
       },
-      vnpTransactionNo: intent.transactionNo,
+      vnpTransactionNo:
+        intent.paymentMethod === 'CASH' ? undefined : intent.transactionNo,
       orders: rounds,
       subtotalAmount: rounds.reduce(
         (sum, order) => sum + order.subtotalAmount,

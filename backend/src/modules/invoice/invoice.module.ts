@@ -4,6 +4,7 @@ import { InvoiceService } from '../order/invoice.service';
 import { Order, OrderSchema } from '../order/order.schema';
 import { Session, SessionSchema } from '../session/session.schema';
 import { Table, TableSchema } from '../table/table.schema';
+import { User, UserSchema } from '../user/user.schema';
 import {
   PaymentIntent,
   PaymentIntentSchema,
@@ -18,6 +19,7 @@ import { InvoiceLookupService } from './invoice-lookup.service';
       { name: Order.name, schema: OrderSchema },
       { name: Session.name, schema: SessionSchema },
       { name: Table.name, schema: TableSchema },
+      { name: User.name, schema: UserSchema },
     ]),
   ],
   controllers: [InvoiceController],

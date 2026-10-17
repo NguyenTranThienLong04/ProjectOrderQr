@@ -9,6 +9,7 @@ export interface InvoiceDetail {
   replacementInvoiceCode?: string;
   reconciliationRequired?: boolean;
   paidAt: string | null;
+  settledByName?: string;
   table: { displayName: string };
   vnpTransactionNo?: string;
   orders: {
@@ -16,6 +17,7 @@ export interface InvoiceDetail {
     items: { name: string; nameEn?: string; quantity: number; unitPrice: number; note?: string; status?: string; rejectionReason?: string; chargedAmount?: number }[];
     subtotalAmount: number;
     discountAmount: number;
+    promotionCode?: string;
     totalAmount: number;
   }[];
   subtotalAmount: number;
@@ -23,9 +25,19 @@ export interface InvoiceDetail {
   totalAmount: number;
 }
 
+export interface RecentCashInvoice {
+  invoiceCode: string;
+  amount: number;
+  paidAt: string | null;
+  table: { displayName: string };
+}
+
 export const invoiceApi = {
-  async lookup(invoiceCode: string): Promise<InvoiceDetail> {
-    return (await axiosClient.get<InvoiceDetail>(`/admin/invoices/${encodeURIComponent(invoiceCode)}`)).data;
+  async recentCash(): Promise<RecentCashInvoice[]> {
+    return (await axiosClient.get<RecentCashInvoice[]>('/admin/invoices')).data;
+  },
+  async lookup(invoiceCode: string, signal?: AbortSignal): Promise<InvoiceDetail> {
+    return (await axiosClient.get<InvoiceDetail>(`/admin/invoices/${encodeURIComponent(invoiceCode)}`, { signal })).data;
   },
   async download(invoiceCode: string) {
     const response = await axiosClient.get(`/admin/invoices/${encodeURIComponent(invoiceCode)}/pdf`, { responseType: 'blob' });

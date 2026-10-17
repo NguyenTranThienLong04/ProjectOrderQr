@@ -21,6 +21,7 @@ export interface InvoiceDetailDto {
   replacementInvoiceCode?: string;
   reconciliationRequired?: boolean;
   paidAt: Date | null;
+  settledByName?: string;
   table: { displayName: string };
   vnpTransactionNo?: string;
   orders: {
@@ -37,6 +38,7 @@ export interface InvoiceDetailDto {
     }[];
     subtotalAmount: number;
     discountAmount: number;
+    promotionCode?: string;
     totalAmount: number;
   }[];
   subtotalAmount: number;

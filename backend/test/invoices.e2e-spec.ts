@@ -318,7 +318,7 @@ describe('Invoice codes: isolated Mongo + real JWT/HTTP/payment', () => {
   ])('malformed input %s gives 400', async (code) => {
     await get(code).expect(400);
   });
-  it.each(['kitchen', 'waiter', 'customer'])(
+  it.each(['kitchen', 'customer'])(
     '%s cannot use lookup or PDF',
     async (role) => {
       for (const suffix of ['', '/pdf'])

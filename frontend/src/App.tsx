@@ -51,6 +51,7 @@ function App() {
         <Route element={<StaffLayout />}>
          <Route path="/kitchen" element={<RequireRole roles={["kitchen"]}><KitchenDisplay /></RequireRole>} />
          <Route path="/waiter" element={<RequireRole roles={["waiter"]}><WaiterDashboard /></RequireRole>} />
+         <Route path="/waiter/invoices" element={<RequireRole roles={["waiter"]}><main id="main-content" tabIndex={-1} className="px-4 py-6 sm:px-6"><InvoiceLookup /></main></RequireRole>} />
         </Route>
         {/* Redirect Root to Login */}
         <Route path="/" element={<Navigate to="/login" replace />} />

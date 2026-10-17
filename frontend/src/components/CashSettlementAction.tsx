@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { Banknote, LoaderCircle } from 'lucide-react';
 import {
   paymentApi,
+  type CashSettlementReceipt,
   type CashSettlementSummary,
 } from '../services/api/payment';
 import {
@@ -24,7 +25,7 @@ export function CashSettlementAction({
   onSettled,
 }: {
   tableId: string;
-  onSettled: (invoiceCode: string) => void;
+  onSettled: (receipt: CashSettlementReceipt & { tableCode: string }) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [summary, setSummary] = useState<CashSettlementSummary | null>(null);
@@ -61,7 +62,9 @@ export function CashSettlementAction({
       );
       setOpen(false);
       setSummary(null);
-      onSettled(receipt.invoiceCode);
+      // The parent owns the result: releasing the table can unmount this action
+      // through a socket refresh before the settlement response arrives.
+      onSettled({ ...receipt, tableCode: summary.tableCode });
     } catch (error) {
       setError(message(error));
       setSummary(null);

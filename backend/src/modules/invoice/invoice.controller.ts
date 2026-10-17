@@ -9,9 +9,14 @@ import { InvoiceLookupService } from './invoice-lookup.service';
 
 @Controller('admin/invoices')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(UserRole.ADMIN)
+@Roles(UserRole.ADMIN, UserRole.WAITER)
 export class InvoiceController {
   constructor(private readonly invoices: InvoiceLookupService) {}
+
+  @Get()
+  recentCash() {
+    return this.invoices.recentCash();
+  }
 
   @Get(':invoiceCode')
   lookup(@Param() params: InvoiceParamsDto) {

@@ -17,12 +17,18 @@ import {
 import { Table, TableDocument } from '../src/modules/table/table.schema';
 import { SocketAuthService } from '../src/gateway/socket-auth.service';
 import { VnpayService } from '../src/modules/vnpay/vnpay.service';
+import {
+  PaymentIntent,
+  PaymentIntentDocument,
+} from '../src/modules/vnpay/payment-intent.schema';
+import { InvoiceDetailDto } from '../src/modules/invoice/dto/invoice.dto';
 
 describe('Cash settlement HTTP authorization and QR lifecycle', () => {
   let app: INestApplication<App>;
   let tables: Model<TableDocument>;
   let sessions: Model<SessionDocument>;
   let orders: Model<OrderDocument>;
+  let intents: Model<PaymentIntentDocument>;
   const tokens = new Map<UserRole, string>();
   beforeAll(async () => {
     const module = await Test.createTestingModule({
@@ -40,6 +46,7 @@ describe('Cash settlement HTTP authorization and QR lifecycle', () => {
     tables = app.get(getModelToken(Table.name));
     sessions = app.get(getModelToken(Session.name));
     orders = app.get(getModelToken(Order.name));
+    intents = app.get(getModelToken(PaymentIntent.name));
     const users = app.get<Model<UserDocument>>(getModelToken(User.name));
     for (const role of [UserRole.ADMIN, UserRole.WAITER, UserRole.KITCHEN]) {
       const user = await users.create({
@@ -81,14 +88,25 @@ describe('Cash settlement HTTP authorization and QR lifecycle', () => {
         tableId: table._id,
         sessionId: session._id,
         status: OrderStatus.SERVED,
+        subtotalAmount: 50000,
+        discountAmount: 5000,
+        promotionCode: 'CASH5',
         totalAmount: 45000,
         items: [
           {
             dishId: new Types.ObjectId(),
             dishName: 'Rice',
-            unitPrice: 45000,
+            unitPrice: 50000,
             quantity: 1,
             status: OrderStatus.SERVED,
+          },
+          {
+            dishId: new Types.ObjectId(),
+            dishName: 'Unavailable dish',
+            unitPrice: 90000,
+            quantity: 1,
+            status: 'Rejected',
+            rejectionReason: 'Sold out',
           },
         ],
       });
@@ -141,8 +159,72 @@ describe('Cash settlement HTTP authorization and QR lifecycle', () => {
         .set('Authorization', token)
         .send(confirmation)
         .expect(201);
-      const receipt: unknown = receiptResponse.body;
+      const receipt = receiptResponse.body as {
+        invoiceCode: string;
+        amount: number;
+      };
       expect(receipt).toMatchObject({ paymentMethod: 'CASH', amount: 45000 });
+      const savedReceipt = await intents
+        .findOne({ invoiceCode: receipt.invoiceCode })
+        .orFail();
+      expect(savedReceipt.paymentMethod).toBe('CASH');
+      expect(savedReceipt.coveredOrderIds.map(String)).toEqual([order.id]);
+      expect(
+        await intents.countDocuments({ invoiceCode: receipt.invoiceCode }),
+      ).toBe(1);
+      expect((await tables.findById(table._id))?.toObject()).toMatchObject({
+        status: 'available',
+        currentSessionId: null,
+      });
+      expect((await sessions.findById(session._id))?.status).toBe('closed');
+      const invoicePath = `/admin/invoices/${receipt.invoiceCode}`;
+      const countBeforeReads = await intents.countDocuments();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const invoiceResponse = await request(http)
+          .get(invoicePath)
+          .set('Authorization', token)
+          .expect(200);
+        const invoice = invoiceResponse.body as InvoiceDetailDto;
+        expect(invoice).toMatchObject({
+          invoiceCode: receipt.invoiceCode,
+          paymentMethod: 'CASH',
+          paymentStatus: 'succeeded',
+          totalAmount: 45000,
+          subtotalAmount: 50000,
+          discountAmount: 5000,
+          settledByName: role,
+          paidAt: expect.any(String) as unknown,
+          table: { displayName: table.tableCode },
+        });
+        expect(invoice.vnpTransactionNo).toBeUndefined();
+        expect(invoice.orders[0]).toMatchObject({ promotionCode: 'CASH5' });
+        expect(invoice.orders[0].items[1]).toMatchObject({
+          status: 'Rejected',
+          chargedAmount: 0,
+        });
+        await request(http)
+          .get(`${invoicePath}/pdf`)
+          .set('Authorization', token)
+          .expect(200)
+          .expect('Content-Type', /application\/pdf/)
+          .expect(
+            'Content-Disposition',
+            `attachment; filename="SmartOrder-${receipt.invoiceCode}.pdf"`,
+          );
+      }
+      const history = await request(http)
+        .get('/admin/invoices')
+        .set('Authorization', token)
+        .expect(200);
+      expect(history.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            invoiceCode: receipt.invoiceCode,
+            amount: 45000,
+          }),
+        ]),
+      );
+      expect(await intents.countDocuments()).toBe(countBeforeReads);
       expect((await orders.findById(order._id))?.paymentMethod).toBe('CASH');
       await request(http)
         .post(path)
@@ -161,6 +243,10 @@ describe('Cash settlement HTTP authorization and QR lifecycle', () => {
       };
       expect(next.sessionId).not.toBe(session.id);
       expect(next.currentOrder).toBeNull();
+      await request(http)
+        .get(invoicePath)
+        .set('Authorization', token)
+        .expect(200);
       await request(http)
         .get('/vnpay/payment-status')
         .query({
