@@ -8,6 +8,8 @@ export enum PaymentIntentStatus {
   FAILED = 'failed',
   /** Operator-verified rejection before a provider payment was created; not an IPN. */
   PROVIDER_REJECTED = 'provider_rejected',
+  /** Replaced by a staff-recorded payment; says nothing about provider outcome. */
+  SUPERSEDED = 'superseded',
 }
 
 // Older versions also wrote FAILED on local expiry/browser return. Those
@@ -55,14 +57,37 @@ export class PaymentIntent {
   @Prop({ required: true, min: 0 })
   amount!: number;
 
-  @Prop({ type: String, enum: ['vnpay', 'internal_zero'], default: 'vnpay' })
-  paymentMethod!: 'vnpay' | 'internal_zero';
+  @Prop({
+    type: String,
+    enum: ['vnpay', 'internal_zero', 'CASH'],
+    default: 'vnpay',
+  })
+  paymentMethod!: 'vnpay' | 'internal_zero' | 'CASH';
 
   @Prop({ default: false })
   ipnConfirmed!: boolean;
 
-  @Prop({ type: String, enum: ['reconciliation'] })
-  resolutionSource?: 'reconciliation';
+  @Prop({ type: String, enum: ['reconciliation', 'cash_settlement'] })
+  resolutionSource?: 'reconciliation' | 'cash_settlement';
+
+  @Prop({ type: Types.ObjectId, ref: 'PaymentIntent' })
+  supersededByPaymentId?: Types.ObjectId;
+
+  @Prop({ type: Types.ObjectId, ref: 'User' })
+  settledByUserId?: Types.ObjectId;
+
+  @Prop({ type: String, enum: ['admin', 'waiter'] })
+  settledByRole?: string;
+
+  /** Only populated from a verified, real IPN after cash supersession. */
+  @Prop({ type: String, enum: ['succeeded', 'failed'] })
+  lateProviderStatus?: 'succeeded' | 'failed';
+
+  @Prop({ type: Date })
+  lateProviderReceivedAt?: Date;
+
+  @Prop({ default: false })
+  reconciliationRequired!: boolean;
 
   /** Gateway rejection code, distinct from an IPN responseCode. */
   @Prop({ trim: true })

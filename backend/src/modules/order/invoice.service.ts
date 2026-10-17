@@ -103,6 +103,10 @@ export class InvoiceService {
     document.fillColor('#000000').moveDown(2);
     document.fontSize(11).text(`Mã hóa đơn: ${invoice.invoiceCode}`);
     document.text(`Bàn: ${invoice.table.displayName}`);
+    if (invoice.paymentMethod)
+      document.text(
+        `Phương thức: ${invoice.paymentMethod === 'CASH' ? 'Tiền mặt (CASH)' : invoice.paymentMethod === 'vnpay' ? 'VNPAY' : 'Thanh toán 0 đồng'}`,
+      );
     document.text(
       `Thời gian: ${invoice.paidAt ? this.formatDate(invoice.paidAt) : 'Chưa có thông tin'}`,
     );

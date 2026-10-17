@@ -4,6 +4,7 @@ const integrationTests = [
   'src/modules/order/order.transaction.spec.ts',
   'src/modules/session/session.lifecycle.spec.ts',
   'src/modules/vnpay/vnpay.transaction.spec.ts',
+  'src/modules/vnpay/cash-settlement.transaction.spec.ts',
   'test/mongo-isolation.integration.spec.ts',
   'test/payment-intent-migration.integration.spec.ts',
 ];

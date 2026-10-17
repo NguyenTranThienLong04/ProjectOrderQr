@@ -7,7 +7,7 @@ import { invoiceApi, invoiceCodePattern } from '../../services/api/invoice';
 import type { InvoiceDetail } from '../../services/api/invoice';
 
 const money = (amount: number) => new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
-const paymentLabels = { pending: 'Chờ xác nhận thanh toán', succeeded: 'Đã thanh toán', failed: 'Thanh toán không thành công', provider_rejected: 'Cổng thanh toán từ chối' };
+const paymentLabels = { pending: 'Chờ xác nhận thanh toán', succeeded: 'Đã thanh toán', failed: 'Thanh toán không thành công', provider_rejected: 'Cổng thanh toán từ chối', superseded: 'Đã thay thế bằng thanh toán tiền mặt' };
 type SearchState = 'idle' | 'loading' | 'invalid' | 'not-found' | 'success' | 'error';
 const messages = {
   invalid: 'Mã hóa đơn không hợp lệ. Nhập theo mẫu INV-20260910-K7P4X2M9.',
@@ -68,7 +68,10 @@ export function InvoiceLookup() {
     {state === 'success' && invoice && <section aria-label="Kết quả tra cứu" className="space-y-5 rounded-xl border border-slate-200 bg-white p-4 sm:p-6">
       <p role="status" className="text-sm font-medium text-emerald-700">Đã tìm thấy hóa đơn.</p>
       <h2 className="break-words text-lg font-bold text-slate-950">{invoice.invoiceCode}</h2>
+      {invoice.replacementInvoiceCode && <p className="break-words text-sm">Hóa đơn tiền mặt thay thế: {invoice.replacementInvoiceCode}</p>}
+      {invoice.reconciliationRequired && <Feedback tone="warning">VNPAY ghi nhận tiền sau khi đã thu tiền mặt. Cần đối soát và xử lý khoản thu trùng.</Feedback>}
       <dl className="grid gap-4 text-sm sm:grid-cols-2">
+        {invoice.paymentMethod && <div><dt className="text-slate-600">Phương thức</dt><dd className="mt-1 font-semibold">{invoice.paymentMethod === 'CASH' ? 'Tiền mặt (CASH)' : invoice.paymentMethod === 'vnpay' ? 'VNPAY' : 'Thanh toán 0 đồng'}</dd></div>}
         <div><dt className="text-slate-600">Trạng thái thanh toán</dt><dd className="mt-1 font-semibold">{paymentLabels[invoice.paymentStatus]}</dd></div>
         <div><dt className="text-slate-600">Bàn</dt><dd className="mt-1 font-semibold">{invoice.table.displayName}</dd></div>
         <div><dt className="text-slate-600">Thời gian thanh toán</dt><dd className="mt-1 font-semibold">{invoice.paidAt ? new Intl.DateTimeFormat('vi-VN', { dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(invoice.paidAt)) : 'Chưa ghi nhận thanh toán'}</dd></div>

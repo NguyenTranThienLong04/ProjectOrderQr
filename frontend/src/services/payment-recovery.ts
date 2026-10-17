@@ -1,6 +1,6 @@
 import type { PaymentStatus } from './api/payment';
 
-export type PaymentRecoveryStatus = 'pending' | 'paid' | 'failed' | 'unknown';
+export type PaymentRecoveryStatus = 'pending' | 'paid' | 'failed' | 'unknown' | 'superseded';
 
 // At most five GETs per recovery cycle, each with the API's five-second timeout.
 // Events can expedite a pending retry, but cannot reset a running cycle's budget.
@@ -30,9 +30,9 @@ export function createPaymentRecovery(
       try {
         const payment = await verify(controller.signal);
         if (!active) return;
-        if (payment.status === 'succeeded' || payment.status === 'failed') {
+        if (payment.status === 'succeeded' || payment.status === 'failed' || payment.status === 'superseded') {
           terminal = true;
-          onStatus(payment.status === 'succeeded' ? 'paid' : 'failed', payment);
+          onStatus(payment.status === 'succeeded' ? 'paid' : payment.status, payment);
         }
       } catch { /* Retry transient HTTP errors within the same finite budget. */ }
     })().finally(() => {

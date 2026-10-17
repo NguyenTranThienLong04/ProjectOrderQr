@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -53,6 +54,11 @@ export class TableService {
   }
 
   async create(createTableDto: CreateTableDto): Promise<TableDocument> {
+    if (
+      createTableDto.status &&
+      createTableDto.status !== TableStatus.AVAILABLE
+    )
+      throw new BadRequestException('Bàn mới phải ở trạng thái trống');
     const existing = await this.tableModel.findOne({
       tableCode: createTableDto.tableCode.trim().toUpperCase(),
     });
@@ -104,19 +110,52 @@ export class TableService {
       updateTableDto.tableCode = updateTableDto.tableCode.trim().toUpperCase();
     }
 
+    const changesStatus = updateTableDto.status !== undefined;
+    if (changesStatus && updateTableDto.status !== TableStatus.AVAILABLE)
+      throw new ConflictException(
+        'Trạng thái phục vụ/thanh toán do phiên ăn quản lý',
+      );
     const updatedTable = await this.tableModel
-      .findByIdAndUpdate(id, updateTableDto, { new: true })
+      .findOneAndUpdate(
+        {
+          _id: id,
+          ...(changesStatus
+            ? {
+                currentSessionId: null,
+                status: TableStatus.AVAILABLE,
+                groupedWithTableIds: { $size: 0 },
+              }
+            : {}),
+        },
+        { $set: updateTableDto, $inc: { __v: 1 } },
+        { new: true },
+      )
       .exec();
 
     if (!updatedTable) {
+      if (await this.tableModel.exists({ _id: id }))
+        throw new ConflictException(
+          'Bàn đang có phiên hoặc thuộc nhóm. Hãy xác nhận thanh toán tiền mặt hoặc dọn bàn qua nghiệp vụ riêng',
+        );
       throw new NotFoundException(`Không tìm thấy bàn với ID ${id}`);
     }
     return updatedTable;
   }
 
   async remove(id: string): Promise<void> {
-    const result = await this.tableModel.findByIdAndDelete(id).exec();
+    const result = await this.tableModel
+      .findOneAndDelete({
+        _id: id,
+        currentSessionId: null,
+        status: TableStatus.AVAILABLE,
+        groupedWithTableIds: { $size: 0 },
+      })
+      .exec();
     if (!result) {
+      if (await this.tableModel.exists({ _id: id }))
+        throw new ConflictException(
+          'Không thể xóa bàn đang có phiên hoặc thuộc nhóm',
+        );
       throw new NotFoundException(`Không tìm thấy bàn với ID ${id}`);
     }
   }

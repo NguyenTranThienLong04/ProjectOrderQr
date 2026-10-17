@@ -202,6 +202,20 @@ describe('Socket authorization regressions', () => {
     expect(server.sockets.adapter.rooms.has('admin')).toBe(false);
   });
 
+  it('delivers session closure after ownership is released, then disconnects only the old customer', async () => {
+    const grant = await auth.issueCustomer(sessionA, tableA);
+    const customer = await connect({ customerToken: grant.customerToken });
+    const other = await connect({ customerToken: (await auth.issueCustomer(sessionB, tableB)).customerToken });
+    const closed = event(customer, 'session:closed');
+    const disconnected = event(customer, 'disconnect');
+    owners.delete(sessionA);
+    await gateway.endCustomerSession(sessionA);
+    expect(await closed).toEqual({ sessionId: sessionA });
+    await disconnected;
+    expect(customer.connected).toBe(false);
+    expect(other.connected).toBe(true);
+  });
+
   it('maps verified staff roles to rooms/events and reauthenticates reconnects', async () => {
     const kitchen = await connect({
       token: staffToken(UserRole.KITCHEN),

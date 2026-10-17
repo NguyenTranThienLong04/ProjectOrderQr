@@ -8,6 +8,7 @@ import { Table, TableSchema } from '../table/table.schema';
 import { PaymentIntent, PaymentIntentSchema } from './payment-intent.schema';
 import { VnpayController } from './vnpay.controller';
 import { VnpayService } from './vnpay.service';
+import { CashSettlementController } from './cash-settlement.controller';
 
 @Module({
   imports: [
@@ -20,7 +21,7 @@ import { VnpayService } from './vnpay.service';
       { name: PaymentIntent.name, schema: PaymentIntentSchema },
     ]),
   ],
-  controllers: [VnpayController],
+  controllers: [VnpayController, CashSettlementController],
   providers: [VnpayService],
 })
 export class VnpayModule {}

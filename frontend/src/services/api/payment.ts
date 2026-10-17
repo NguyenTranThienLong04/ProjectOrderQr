@@ -45,14 +45,23 @@ export interface PaymentStatus {
   invoiceCode?: string;
   txnRef: string;
   sessionId: string;
-  status: 'pending' | 'succeeded' | 'failed';
+  status: 'pending' | 'succeeded' | 'failed' | 'superseded';
   amount: number;
   coveredOrderIds: string[];
   completedAt?: string | null;
   transactionNo?: string;
 }
 
+export interface CashSettlementSummary extends SessionPaymentSummary {
+  sessionVersion: number;
+  confirmationKey: string;
+}
+
 export const paymentApi = {
+  getCashSettlementSummary: async (tableId: string): Promise<CashSettlementSummary> =>
+    (await axiosClient.get(`/payments/tables/${tableId}/cash-settlement`)).data,
+  settleCash: async (tableId: string, sessionId: string, sessionVersion: number, confirmationKey: string): Promise<{ invoiceCode: string; amount: number; paymentMethod: 'CASH' }> =>
+    (await axiosClient.post(`/payments/tables/${tableId}/cash-settlement`, { sessionId, sessionVersion, confirmationKey })).data,
   getSessionSummary: async (
     sessionId: string,
     tableId: string,

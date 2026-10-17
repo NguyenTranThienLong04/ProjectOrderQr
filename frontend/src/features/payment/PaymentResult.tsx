@@ -53,6 +53,9 @@ export function PaymentResult() {
       }
     };
     socket.on('session:payment-updated', updatePayment);
+    socket.on('session:closed', (event: { sessionId?: string }) => {
+      if (event.sessionId === sessionId) void recovery.recheck();
+    });
     return () => {
       recovery.dispose(); recoveryRef.current = null; unbind();
       socket.removeAllListeners();
@@ -73,7 +76,12 @@ export function PaymentResult() {
     }
   };
   const config =
-    status === 'paid'
+    status === 'superseded' ? {
+      icon: CheckCircle2,
+      title: 'Đã thanh toán tiền mặt',
+      text: 'Nhân viên đã xác nhận tiền mặt và đóng phiên ăn. Checkout VNPAY này đã được thay thế. Nếu ngân hàng vẫn trừ tiền, hãy liên hệ nhân viên để đối soát.',
+      color: 'bg-emerald-50 text-emerald-700',
+    } : status === 'paid'
       ? {
           icon: CheckCircle2,
           title: 'Thanh toán thành công',
@@ -138,12 +146,13 @@ export function PaymentResult() {
             {invoiceError}
           </p>
         )}
-        <a
+        {status !== 'superseded' && <a
           className="mt-3 inline-flex min-h-11 w-full items-center justify-center rounded-lg bg-accent-600 px-5 py-2 text-sm font-semibold text-white transition hover:bg-accent-500"
           href={tableId ? `/menu?tableId=${encodeURIComponent(customerScopeTable(sessionId, tableId))}&sessionId=${encodeURIComponent(sessionId)}` : '/menu'}
         >
           Quay lại menu tại bàn
-        </a>
+        </a>}
+        {status === 'superseded' && <p className="mt-4 text-sm text-stone-600">Quét lại QR trên bàn để bắt đầu phiên mới.</p>}
         {status === 'pending' && (
           <p className="mt-4 text-xs text-stone-500">
             Kết quả được kiểm tra qua HTTP ngay cả khi mất kết nối cập nhật trực tiếp.

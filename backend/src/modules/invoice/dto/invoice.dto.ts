@@ -17,6 +17,9 @@ export class InvoiceParamsDto {
 export interface InvoiceDetailDto {
   invoiceCode: string;
   paymentStatus: PaymentIntentStatus;
+  paymentMethod?: 'vnpay' | 'internal_zero' | 'CASH';
+  replacementInvoiceCode?: string;
+  reconciliationRequired?: boolean;
   paidAt: Date | null;
   table: { displayName: string };
   vnpTransactionNo?: string;

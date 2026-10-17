@@ -87,6 +87,7 @@ export function CustomerMenu() {
       .then(([result, cart]) => {
         if (controller.signal.aborted) return;
         const nextScope = { tableId: normalizedTableId, sessionId: cart.sessionId };
+        if (scopeRef.current?.sessionId !== cart.sessionId) setPaymentSummary(null);
         scopeRef.current = nextScope; setScope(nextScope);
         const accepted = newerCart(cartRef.current, cart, cart.sessionId);
         cartRef.current = accepted; setSharedCart(accepted); setMenu(result);
@@ -125,7 +126,11 @@ export function CustomerMenu() {
       },
       onError: (_error, expired) => {
         setIsSyncing(false); setIsCallingWaiter(false);
-        if (expired) { cartRef.current = null; setSharedCart(null); setPaymentSummary(null); }
+        if (expired) {
+          menuLoadRef.current?.controller.abort();
+          cartRef.current = null; setSharedCart(null); setPaymentSummary(null);
+          setIsCartOpen(false); setSelectedDish(null);
+        }
         setError(expired ? 'Phiên tại bàn đã hết hiệu lực hoặc quyền truy cập đã thay đổi. Vui lòng quét lại QR tại bàn.' : 'Chưa đồng bộ được dữ liệu. Kiểm tra kết nối và thử tải lại.');
       },
     });

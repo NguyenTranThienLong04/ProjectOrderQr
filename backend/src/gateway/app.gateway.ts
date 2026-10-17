@@ -118,6 +118,20 @@ export class AppGateway
     return `session:${sessionId}`;
   }
 
+  /** Called after close commits. Normal emit() requires an ACTIVE session and
+   * would disconnect these customers before they could receive the close signal. */
+  async endCustomerSession(sessionId: string): Promise<void> {
+    for (const id of await this.server.in(this.room(sessionId)).allSockets()) {
+      const client = this.server.sockets.sockets.get(id);
+      if (!client) continue;
+      const identity = this.identity(client);
+      if (identity?.kind !== 'customer' || identity.sessionId !== sessionId)
+        continue;
+      client.emit('session:closed', { sessionId });
+      client.disconnect(true);
+    }
+  }
+
   async emit(rooms: string | string[], event: string, payload?: unknown): Promise<void> {
     const targets = Array.isArray(rooms) ? rooms : [rooms];
     // Room membership is not lasting authorization, including staff roles.

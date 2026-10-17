@@ -24,6 +24,14 @@ export function customerToken(sessionId: string, tableId: string) {
   return localStorage.getItem(`customer-socket:${sessionId}:${tableId}`) ?? '';
 }
 
+export function forgetCustomerGrant(sessionId: string, tableId: string) {
+  const token = customerToken(sessionId, tableId);
+  if (token && localStorage.getItem(`customer-table:${tableId}`) === token)
+    localStorage.removeItem(`customer-table:${tableId}`);
+  localStorage.removeItem(`customer-socket:${sessionId}:${tableId}`);
+  localStorage.removeItem(`customer-scope:${sessionId}`);
+}
+
 // A payment return can name the primary table of a merged session. Keep using
 // the physical-table scope actually granted to this browser for that session.
 export function customerScopeTable(sessionId: string, fallback: string) {

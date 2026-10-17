@@ -19,6 +19,8 @@ import { sessionApi, type TableOperationOptions } from '../../services/api/sessi
 import { tableApi, type Table } from '../../services/api/table';
 import { EmptyState, Feedback, PageHeader, StatusBadge, controlClass, labelClass, primaryButtonClass, secondaryButtonClass } from '../../components/ui';
 
+import { CashSettlementAction } from '../../components/CashSettlementAction';
+
 interface WaiterCall { tableId: string; timestamp: string; }
 const getErrorMessage = (error: unknown) => (error as { response?: { data?: { message?: string } } }).response?.data?.message ?? (error instanceof Error ? error.message : 'Vui lòng thử lại.');
 
@@ -59,7 +61,7 @@ export default function WaiterDashboard() {
   }, [load]);
 
   const activeTables = useMemo(() => tables.filter((table) => table.currentSessionId), [tables]);
-  const waitingTables = useMemo(() => tables.filter((table) => table.status === 'waiting_payment'), [tables]);
+  const waitingTables = useMemo(() => tables.filter((table) => table.status === 'waiting_payment' || (table.status === 'available' && table.currentSessionId)), [tables]);
   const readyItems = orders.reduce((sum, order) => sum + order.items.length, 0);
   const resolveTableLabel = (tableId: string) => tables.find((table) => table._id === tableId)?.tableCode ?? tableId;
 
@@ -118,7 +120,7 @@ export default function WaiterDashboard() {
         </div>
 
         <div className="space-y-5">
-          <section aria-labelledby="payment-title" className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><h2 id="payment-title" className="text-lg font-bold text-slate-950">Thanh toán & dọn bàn</h2><p className="mt-1 text-sm text-slate-600">Chỉ dọn bàn khi hệ thống đã xác nhận toàn bộ Session không còn đơn chưa thanh toán.</p>{waitingTables.length === 0 ? <p className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">Không có bàn chờ thanh toán.</p> : <ul className="mt-4 space-y-3">{waitingTables.map((table) => { const payment = paymentSummaries.find((summary) => summary.tableId === table._id); const canClear = Boolean(payment?.isPaid); return <li key={table._id} className="flex items-center gap-3 rounded-lg border border-slate-200 p-3"><div className="min-w-0 flex-1"><p className="font-bold text-slate-950">Bàn {table.tableCode}</p><StatusBadge status={canClear ? 'Paid' : 'waiting_payment'} label={canClear ? 'Đã trả · chờ dọn' : 'Còn số dư Session'} /></div><button onClick={() => void clearTable(table._id)} disabled={!canClear || clearingTableId === table._id} className={`${primaryButtonClass} shrink-0 px-3`}>{clearingTableId === table._id ? <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Sparkles aria-hidden="true" className="h-4 w-4" />}<span className="hidden sm:inline">Dọn bàn</span></button></li>; })}</ul>}</section>
+          <section aria-labelledby="payment-title" className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><h2 id="payment-title" className="text-lg font-bold text-slate-950">Thanh toán & dọn bàn</h2><p className="mt-1 text-sm text-slate-600">Chỉ dọn bàn khi hệ thống đã xác nhận toàn bộ Session không còn đơn chưa thanh toán.</p>{waitingTables.length === 0 ? <p className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-600">Không có bàn chờ thanh toán.</p> : <ul className="mt-4 space-y-3">{waitingTables.map((table) => { const payment = paymentSummaries.find((summary) => summary.tableId === table._id); const canClear = Boolean(payment?.isPaid); return <li key={table._id} className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 p-3"><div className="min-w-0 flex-1"><p className="font-bold text-slate-950">Bàn {table.tableCode}</p><StatusBadge status={canClear ? 'Paid' : 'waiting_payment'} label={canClear ? 'Đã trả · chờ dọn' : 'Còn số dư Session'} /></div>{!canClear && <CashSettlementAction tableId={table._id} onSettled={(code) => { setSuccess(`Đã thanh toán tiền mặt · Hóa đơn ${code}`); void load(); }} />}<button onClick={() => void clearTable(table._id)} disabled={!canClear || clearingTableId === table._id} className={`${primaryButtonClass} shrink-0 px-3`}>{clearingTableId === table._id ? <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" /> : <Sparkles aria-hidden="true" className="h-4 w-4" />}<span className="hidden sm:inline">Dọn bàn</span></button></li>; })}</ul>}</section>
 
           <section aria-labelledby="table-status-title" className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5"><div className="flex items-center justify-between"><h2 id="table-status-title" className="text-lg font-bold text-slate-950">Sơ đồ trạng thái bàn</h2><span className="text-xs font-medium text-slate-500">{tables.length} bàn</span></div><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2 2xl:grid-cols-3">{tables.map((table) => <div key={table._id} className="rounded-lg border border-slate-200 p-3"><p className="mb-2 text-lg font-black text-slate-950">{table.tableCode}</p><StatusBadge status={table.status} />{table.groupedWithTableIds && table.groupedWithTableIds.length > 0 && <div className="mt-2"><StatusBadge status="merged" /></div>}</div>)}</div></section>
         </div>

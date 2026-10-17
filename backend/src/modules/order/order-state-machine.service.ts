@@ -159,12 +159,19 @@ export class OrderStateMachineService {
     orderIds: Types.ObjectId[],
     sessionId: Types.ObjectId,
     metadata: {
-      triggeredBy: 'vnpay_webhook' | 'internal_zero';
+      triggeredBy: 'vnpay_webhook' | 'internal_zero' | 'cash_settlement';
+      actor?: { id: string; role: UserRole };
       transactionNo?: string;
       amount: number;
     },
     mongoSession: ClientSession,
   ): Promise<OrderDocument[]> {
+    if (
+      metadata.triggeredBy === 'cash_settlement' &&
+      (!metadata.actor ||
+        ![UserRole.ADMIN, UserRole.WAITER].includes(metadata.actor.role))
+    )
+      throw new ForbiddenException('Chỉ Admin/Waiter được xác nhận tiền mặt');
     const uniqueOrderIds = [
       ...new Map(orderIds.map((id) => [id.toString(), id])).values(),
     ];
@@ -218,13 +225,29 @@ export class OrderStateMachineService {
           },
         },
         {
-          $set: { status: OrderStatus.PAID, paidAt: changedAt },
+          $set: {
+            status: OrderStatus.PAID,
+            paidAt: changedAt,
+            paymentMethod:
+              metadata.triggeredBy === 'cash_settlement'
+                ? 'CASH'
+                : metadata.triggeredBy === 'vnpay_webhook'
+                  ? 'VNPAY'
+                  : 'INTERNAL_ZERO',
+          },
           $inc: { __v: 1 },
           $push: {
             statusHistory: {
               fromStatus: OrderStatus.SERVED,
               toStatus: OrderStatus.PAID,
-              changedBy: { actorType: ActorType.SYSTEM },
+              changedBy:
+                metadata.triggeredBy === 'cash_settlement'
+                  ? {
+                      actorType: ActorType.USER,
+                      userId: new Types.ObjectId(metadata.actor!.id),
+                      role: metadata.actor!.role,
+                    }
+                  : { actorType: ActorType.SYSTEM },
               changedAt,
               transactionNo: metadata.transactionNo,
               amount: metadata.amount,

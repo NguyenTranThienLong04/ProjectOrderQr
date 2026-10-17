@@ -102,6 +102,9 @@ export class Order {
 
   @Prop({ type: Date, default: null })
   paidAt?: Date | null;
+
+  @Prop({ type: String, enum: ['CASH', 'VNPAY', 'INTERNAL_ZERO'] })
+  paymentMethod?: 'CASH' | 'VNPAY' | 'INTERNAL_ZERO';
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);

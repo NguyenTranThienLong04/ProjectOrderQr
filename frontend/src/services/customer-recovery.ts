@@ -1,7 +1,7 @@
 import type { Socket } from 'socket.io-client';
 import { menuApi, type PublicMenu, type SharedCart } from './api/menu';
 import { paymentApi, type SessionPaymentSummary } from './api/payment';
-import { isSessionUnavailable, type CustomerGrant } from './customer-access';
+import { forgetCustomerGrant, isSessionUnavailable, SessionScopeError, type CustomerGrant } from './customer-access';
 import { bindSnapshotRecovery, createSnapshotRefresh } from './snapshot-refresh';
 
 export interface CustomerScope { sessionId: string; tableId: string; }
@@ -59,9 +59,17 @@ export function startCustomerRecovery(socket: Socket, options: {
     options.onScope({ sessionId: grant.sessionId, tableId: grant.tableId });
   };
   const changed = () => { void refresh(); };
+  const closed = (event: { sessionId?: string }) => {
+    if (event.sessionId === scope.sessionId) fail(new SessionScopeError());
+  };
+  const disconnected = (reason: string) => {
+    if (reason === 'io server disconnect') void refresh();
+  };
   const events = ['session:table-added', 'session:merged', 'session:merged_or_moved', 'session:unmerged', 'order:updated', 'session:payment-updated'];
   socket.on('cart:synced', synced);
   socket.on('session:authorized', authorized);
+  socket.on('session:closed', closed);
+  socket.on('disconnect', disconnected);
   events.forEach((event) => socket.on(event, changed));
   function dispose() {
     active = false;
@@ -69,12 +77,14 @@ export function startCustomerRecovery(socket: Socket, options: {
     unbind();
     socket.off('cart:synced', synced);
     socket.off('session:authorized', authorized);
+    socket.off('session:closed', closed);
+    socket.off('disconnect', disconnected);
     events.forEach((event) => socket.off(event, changed));
   }
   function fail(error: unknown) {
     if (!active) return;
     const expired = isSessionUnavailable(error);
-    if (expired) { dispose(); socket.disconnect(); }
+    if (expired) { dispose(); forgetCustomerGrant(scope.sessionId, scope.tableId); socket.disconnect(); }
     options.onError(error, expired);
   }
   void refresh(); // HTTP also recovers when Socket cannot connect at all.

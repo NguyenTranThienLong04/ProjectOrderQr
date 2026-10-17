@@ -9,11 +9,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ClientSession, Connection, Model, Types } from 'mongoose';
 import { frontendUrl } from '../../common/config/public-urls';
 import { OrderStatus } from '../../common/enums/order-status.enum';
 import { SessionStatus } from '../../common/enums/session-status.enum';
+import { TableStatus } from '../../common/enums/table-status.enum';
+import { UserRole } from '../../common/enums/user-role.enum';
+import { lifecycleTransaction } from '../session/lifecycle-transaction';
 import { AppGateway } from '../../gateway/app.gateway';
 import { InvoiceLookupService } from '../invoice/invoice-lookup.service';
 import { ensureInvoiceCode, withInvoiceCodeRetry } from './invoice-code';
@@ -377,6 +380,249 @@ export class VnpayService implements OnModuleInit {
     return (await this.loadSessionBilling(sessionId, tableId)).summary;
   }
 
+  private async cashBilling(tableId: string, mongoSession?: ClientSession) {
+    if (!Types.ObjectId.isValid(tableId))
+      throw new NotFoundException('Không tìm thấy bàn');
+    const table = await this.tableModel
+      .findById(tableId)
+      .session(mongoSession ?? null)
+      .exec();
+    if (!table?.currentSessionId)
+      throw new ConflictException('Bàn không có phiên đang hoạt động');
+    const billing = await this.loadSessionBilling(
+      table.currentSessionId.toString(),
+      tableId,
+      mongoSession,
+    );
+    const paidByProvider = await this.paymentIntentModel
+      .exists({
+        status: PaymentIntentStatus.SUCCEEDED,
+        paymentMethod: 'vnpay',
+        $or: [
+          { sessionId: billing.session._id },
+          {
+            coveredOrderIds: {
+              $in: billing.orderDocuments.map((order) => order._id),
+            },
+          },
+        ],
+      })
+      .session(mongoSession ?? null)
+      .exec();
+    if (paidByProvider)
+      throw new ConflictException(
+        'VNPAY đã xác nhận thanh toán; không thể thu tiền mặt cho phiên này',
+      );
+    if (billing.session.cart.length)
+      throw new ConflictException(
+        'Phải xử lý giỏ hàng trước khi thanh toán tiền mặt',
+      );
+    if (!billing.summary.canPay)
+      throw new ConflictException(billing.summary.eligibilityMessage);
+    return billing;
+  }
+
+  private cashConfirmationKey(orders: OrderDocument[]) {
+    // A cancellation can change the bill without changing Session.version.
+    return createHash('sha256')
+      .update(
+        JSON.stringify(
+          orders
+            .map((order) => [order.id, order.totalAmount])
+            .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+        ),
+      )
+      .digest('hex');
+  }
+
+  async getCashSettlementSummary(
+    tableId: string,
+  ): Promise<
+    SessionPaymentSummary & { sessionVersion: number; confirmationKey: string }
+  > {
+    const billing = await this.cashBilling(tableId);
+    return {
+      ...billing.summary,
+      sessionVersion: billing.session.version,
+      confirmationKey: this.cashConfirmationKey(billing.payableDocuments),
+    };
+  }
+
+  async settleCash(
+    tableId: string,
+    expected: {
+      sessionId: string;
+      sessionVersion: number;
+      confirmationKey: string;
+    },
+    actor: { id: string; role: UserRole },
+  ) {
+    if (
+      ![UserRole.ADMIN, UserRole.WAITER].includes(actor.role) ||
+      !Types.ObjectId.isValid(actor.id)
+    )
+      throw new ForbiddenException('Chỉ Admin/Waiter được xác nhận tiền mặt');
+    const result = await withInvoiceCodeRetry((invoiceCode) =>
+      lifecycleTransaction(this.connection, async (mongoSession) => {
+        const billing = await this.cashBilling(tableId, mongoSession);
+        const { session, summary } = billing;
+        if (
+          session.id !== expected.sessionId ||
+          session.version !== expected.sessionVersion ||
+          this.cashConfirmationKey(billing.payableDocuments) !==
+            expected.confirmationKey
+        )
+          throw new ConflictException(
+            'Phiên vừa thay đổi; hãy tải lại số tiền trước khi xác nhận',
+          );
+        const tableIds = session.tableIds?.length
+          ? session.tableIds
+          : [session.tableId];
+        const owned = await this.tableModel
+          .find({ currentSessionId: session._id })
+          .session(mongoSession)
+          .exec();
+        if (
+          owned.length !== tableIds.length ||
+          !tableIds.some((id) => id.equals(session.tableId)) ||
+          owned.some((member) => !tableIds.some((id) => id.equals(member._id)))
+        )
+          throw new ConflictException('Liên kết phiên và bàn không còn khớp');
+        const coveredOrderIds = billing.payableDocuments.map(
+          (order) => order._id,
+        );
+        const unresolved = await this.paymentIntentModel
+          .find({
+            $and: [
+              UNRESOLVED_PAYMENT_FILTER,
+              {
+                $or: [
+                  { sessionId: session._id },
+                  {
+                    coveredOrderIds: {
+                      $in: billing.orderDocuments.map((order) => order._id),
+                    },
+                  },
+                ],
+              },
+            ],
+          })
+          .session(mongoSession)
+          .exec();
+        if (
+          unresolved.some(
+            (intent) =>
+              !intent.sessionId.equals(session._id) ||
+              !intent.coveredOrderIds.length ||
+              intent.coveredOrderIds.some(
+                (id) => !coveredOrderIds.some((covered) => covered.equals(id)),
+              ),
+          )
+        )
+          throw new ConflictException(
+            'Checkout không khớp các đơn cần thanh toán; cần kiểm tra trước khi thu tiền',
+          );
+
+        const now = new Date();
+        // Shared write fence with cart/create-order/move/merge/clear. Never retry
+        // the staff confirmation against a newer session snapshot.
+        const closed = await this.sessionModel
+          .updateOne(
+            {
+              _id: session._id,
+              status: SessionStatus.ACTIVE,
+              version: expected.sessionVersion,
+              cart: { $size: 0 },
+            },
+            {
+              $set: { status: SessionStatus.CLOSED, endedAt: now },
+              $inc: { version: 1 },
+            },
+            { session: mongoSession },
+          )
+          .exec();
+        if (closed.modifiedCount !== 1)
+          throw new ConflictException('Phiên vừa thay đổi');
+        const paidOrders = await this.stateMachine.transitionManyToPaid(
+          coveredOrderIds,
+          session._id,
+          {
+            triggeredBy: 'cash_settlement',
+            actor,
+            amount: summary.payableTotal,
+          },
+          mongoSession,
+        );
+        // A separate receipt preserves the original VNPAY identity/provider facts.
+        const receipt = await new this.paymentIntentModel({
+          invoiceCode,
+          txnRef: `CASH-${new Types.ObjectId().toString()}`,
+          coverageKey: `cash:${session.id}:${coveredOrderIds.map(String).sort().join('.')}`,
+          sessionId: session._id,
+          tableId: billing.table._id,
+          coveredOrderIds,
+          amount: summary.payableTotal,
+          paymentMethod: 'CASH',
+          paymentUrl: 'about:blank',
+          status: PaymentIntentStatus.SUCCEEDED,
+          ipnConfirmed: false,
+          expiresAt: now,
+          completedAt: now,
+          settledByUserId: actor.id,
+          settledByRole: actor.role,
+        }).save({ session: mongoSession });
+        if (unresolved.length) {
+          const resolved = await this.paymentIntentModel
+            .updateMany(
+              {
+                _id: { $in: unresolved.map((intent) => intent._id) },
+                ...UNRESOLVED_PAYMENT_FILTER,
+              },
+              {
+                $set: {
+                  status: PaymentIntentStatus.SUPERSEDED,
+                  resolutionSource: 'cash_settlement',
+                  supersededByPaymentId: receipt._id,
+                  resolvedAt: now,
+                },
+              },
+              { session: mongoSession },
+            )
+            .exec();
+          if (resolved.modifiedCount !== unresolved.length)
+            throw new ConflictException('Checkout vừa thay đổi');
+        }
+        const released = await this.tableModel
+          .updateMany(
+            { _id: { $in: tableIds }, currentSessionId: session._id },
+            {
+              $set: {
+                status: TableStatus.AVAILABLE,
+                currentSessionId: null,
+                groupedWithTableIds: [],
+                groupRootTableId: null,
+                groupedAt: null,
+              },
+              $inc: { __v: 1 },
+            },
+            { session: mongoSession },
+          )
+          .exec();
+        if (released.modifiedCount !== tableIds.length)
+          throw new ConflictException('Bàn vừa thay đổi');
+        return { receipt, paidOrders, tableIds: tableIds.map(String) };
+      }),
+    );
+    await this.notifySettlement(result.receipt, result.paidOrders);
+    return {
+      sessionId: result.receipt.sessionId.toString(),
+      tableIds: result.tableIds,
+      invoiceCode: result.receipt.invoiceCode,
+      amount: result.receipt.amount,
+      paymentMethod: 'CASH' as const,
+    };
+  }
+
   async createPaymentUrl(
     sessionId: string,
     tableId: string,
@@ -689,7 +935,7 @@ export class VnpayService implements OnModuleInit {
             .exec();
           if (
             !intent ||
-            intent.paymentMethod === 'internal_zero' ||
+            intent.paymentMethod !== 'vnpay' ||
             intent.amount === 0
           )
             return {
@@ -702,6 +948,49 @@ export class VnpayService implements OnModuleInit {
             receivedAmount !== intent.amount * 100
           )
             return { response: { RspCode: '04', Message: 'Invalid amount' } };
+          if (intent.status === PaymentIntentStatus.SUPERSEDED) {
+            if (intent.ipnConfirmed) {
+              const matches =
+                intent.lateProviderStatus ===
+                  (success ? 'succeeded' : 'failed') &&
+                intent.responseCode === params.vnp_ResponseCode &&
+                intent.transactionNo === params.vnp_TransactionNo;
+              return {
+                response: matches
+                  ? { RspCode: '02', Message: 'Order already confirmed' }
+                  : { RspCode: '99', Message: 'Conflicting provider result' },
+              };
+            }
+            // This is a real receipt, never another Served -> Paid transition.
+            // Cash remains authoritative; a late provider charge requires review/refund.
+            const recorded = await this.paymentIntentModel
+              .updateOne(
+                {
+                  _id: intent._id,
+                  status: PaymentIntentStatus.SUPERSEDED,
+                  ipnConfirmed: { $ne: true },
+                },
+                {
+                  $set: {
+                    ipnConfirmed: true,
+                    responseCode: params.vnp_ResponseCode,
+                    transactionNo: params.vnp_TransactionNo,
+                    lateProviderStatus: success ? 'succeeded' : 'failed',
+                    lateProviderReceivedAt: new Date(),
+                    reconciliationRequired: success,
+                  },
+                },
+                { session: mongoSession },
+              )
+              .exec();
+            if (recorded.modifiedCount !== 1)
+              throw new ConflictException('Giao dịch vừa thay đổi');
+            if (success)
+              this.logger.warn(
+                `Late VNPAY charge after cash settlement requires reconciliation: ${intent.txnRef}`,
+              );
+            return { response: { RspCode: '00', Message: 'Confirm Success' } };
+          }
           // A receipt after a verified pre-transaction rejection contradicts the
           // reconciliation. Preserve history/Orders and require operator review.
           if (intent.status === PaymentIntentStatus.PROVIDER_REJECTED) {
@@ -808,6 +1097,10 @@ export class VnpayService implements OnModuleInit {
     paidOrders: OrderDocument[],
   ) {
     try {
+      if (completedIntent.paymentMethod === 'CASH')
+        await this.gateway.endCustomerSession(
+          completedIntent.sessionId.toString(),
+        );
       const session = await this.sessionModel
         .findById(completedIntent.sessionId)
         .exec();
@@ -820,6 +1113,7 @@ export class VnpayService implements OnModuleInit {
       ).map((id) => id.toString());
       const rooms = [
         'waiter',
+        'admin',
         `session:${completedIntent.sessionId.toString()}`,
         ...tableIds.map((id) => `table:${id}`),
       ];
@@ -828,6 +1122,7 @@ export class VnpayService implements OnModuleInit {
         sessionId: completedIntent.sessionId.toString(),
         status: PaymentIntentStatus.SUCCEEDED,
         amount: completedIntent.amount,
+        paymentMethod: completedIntent.paymentMethod,
         coveredOrderIds: completedIntent.coveredOrderIds.map((id) =>
           id.toString(),
         ),

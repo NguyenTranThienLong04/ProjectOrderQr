@@ -111,6 +111,16 @@ export class InvoiceLookupService implements OnModuleInit {
     return {
       invoiceCode: await ensureInvoiceCode(this.intents, intent),
       paymentStatus: intent.status,
+      paymentMethod: intent.paymentMethod,
+      replacementInvoiceCode: intent.supersededByPaymentId
+        ? (
+            await this.intents
+              .findById(intent.supersededByPaymentId)
+              .select('invoiceCode')
+              .exec()
+          )?.invoiceCode
+        : undefined,
+      reconciliationRequired: intent.reconciliationRequired,
       paidAt:
         intent.status === PaymentIntentStatus.SUCCEEDED
           ? (intent.completedAt ?? intent.updatedAt ?? null)

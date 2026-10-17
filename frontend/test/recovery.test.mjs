@@ -71,6 +71,34 @@ beforeEach(() => {
 });
 
 describe('1. Customer reconnect and snapshot ordering', () => {
+  test('cash close cancels pending reads and clears old credentials; a new QR session has no old payment scope', async (t) => {
+    const { saveCustomerGrant } = await import('../src/services/customer-access.ts');
+    saveCustomerGrant(cart(1));
+    const socket = new FakeSocket();
+    const held = deferred();
+    axiosClient.defaults.adapter = async (config) => response(config, await held.promise);
+    const { recovery, seen } = customer(socket);
+    t.after(() => recovery.dispose());
+    socket.receive('session:closed', { sessionId: 'another-session' });
+    assert.equal(seen.errors.length, 0);
+    socket.receive('session:closed', scope);
+    held.resolve(cart(2)); await tick();
+    assert.deepEqual(seen.snapshots, []);
+    assert.equal(seen.errors.at(-1).expired, true);
+    assert.equal(localStorage.getItem('customer-table:table-a'), null);
+    assert.equal(localStorage.getItem('customer-socket:session-a:table-a'), null);
+    assert.equal(socket.disconnects, 1);
+    window.location.search = '?tableId=table-a&tableToken=signed-qr';
+    axiosClient.defaults.adapter = async (config) => {
+      assert.equal(config.headers['x-customer-token'], '');
+      assert.equal(config.headers['x-table-token'], 'signed-qr');
+      assert.equal(config.params.sessionId, undefined);
+      return response(config, cart(0, 'new-session'));
+    };
+    const next = await menuApi.getActiveSession('table-a');
+    assert.equal(next.sessionId, 'new-session');
+    assert.equal(localStorage.getItem('customer-table:table-a'), next.customerToken);
+  });
   test('reconnect joins and fetches the scoped HTTP cart; old HTTP/events cannot overwrite newer versions', async (t) => {
     const socket = new FakeSocket();
     let version = 2;
@@ -214,6 +242,19 @@ describe('2. Kitchen/Waiter do not drop refreshes during a request', () => {
 });
 
 describe('3. Payment verification is independent of Socket', () => {
+  test('cash supersession is terminal and never reported as VNPAY paid/failed', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let calls = 0;
+    const statuses = [];
+    const recovery = createPaymentRecovery(async () => {
+      calls += 1; return { ...scope, txnRef: 'old-vnpay', status: 'superseded' };
+    }, (status) => statuses.push(status));
+    t.after(() => recovery.dispose());
+    await recovery.check();
+    t.mock.timers.tick(60000); await recovery.check();
+    assert.equal(calls, 1);
+    assert.deepEqual(statuses, ['pending', 'superseded']);
+  });
   test('offline Socket still reaches Paid via bounded HTTP retry/backoff', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     let calls = 0;

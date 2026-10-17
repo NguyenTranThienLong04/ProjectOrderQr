@@ -4,7 +4,10 @@ import { downloadInvoiceBlob } from './invoice-download';
 export const invoiceCodePattern = /^INV-\d{8}-[A-HJ-NP-Z2-9]{8}$/;
 export interface InvoiceDetail {
   invoiceCode: string;
-  paymentStatus: 'pending' | 'succeeded' | 'failed' | 'provider_rejected';
+  paymentStatus: 'pending' | 'succeeded' | 'failed' | 'provider_rejected' | 'superseded';
+  paymentMethod?: 'vnpay' | 'internal_zero' | 'CASH';
+  replacementInvoiceCode?: string;
+  reconciliationRequired?: boolean;
   paidAt: string | null;
   table: { displayName: string };
   vnpTransactionNo?: string;
